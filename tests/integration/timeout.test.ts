@@ -8,7 +8,7 @@ name: timeout
 participants:
   slow:
     type: exec
-    command: sh -c "sleep 0.2; echo done"
+    run: sh -c "sleep 0.2; echo done"
     timeout: 50ms
 flow:
   - slow

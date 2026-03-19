@@ -48,7 +48,7 @@ export async function executeSubWorkflow(
     typeof result.output === "string" ? result.output : JSON.stringify(result.output ?? null);
 
   return {
-    status: result.success ? "completed" : "failed",
+    status: result.success ? "success" : "failure",
     output,
     parsedOutput: result.output,
     duration: Date.now() - start,

@@ -1,0 +1,9 @@
+name: inline-example
+flow:
+  - type: exec
+    as: greet
+    run: echo "Hello"
+  - type: exec
+    as: farewell
+    run: echo "Goodbye"
+output: farewell.output

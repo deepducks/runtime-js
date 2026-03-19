@@ -19,7 +19,7 @@ function sleep(ms: number): Promise<void> {
 }
 
 export function parseDuration(duration: string): number {
-  const match = duration.match(/^\s*(\d+(?:\.\d+)?)\s*(ms|s|m|h)\s*$/i);
+  const match = duration.match(/^\s*(\d+(?:\.\d+)?)\s*(ms|s|m|h|d)\s*$/i);
   if (!match) {
     throw new Error(`unsupported duration format: ${duration}`);
   }
@@ -36,6 +36,8 @@ export function parseDuration(duration: string): number {
       return Math.round(value * 60 * 1000);
     case "h":
       return Math.round(value * 60 * 60 * 1000);
+    case "d":
+      return Math.round(value * 24 * 60 * 60 * 1000);
     default:
       throw new Error(`unsupported duration unit: ${unit}`);
   }

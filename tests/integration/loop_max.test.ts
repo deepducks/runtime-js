@@ -8,7 +8,7 @@ name: loop-max
 participants:
   echo:
     type: exec
-    command: echo iter
+    run: echo iter
 flow:
   - loop:
       max: 3
@@ -20,7 +20,6 @@ flow:
   const res = await executeWorkflow(wf, {});
 
   expect(res.success).toBe(true);
-  // There should be a result for 'echo' (last iteration overrides same step name)
   expect(res.steps.echo).toBeDefined();
-  expect((res.steps.echo as any).status).toBe("completed");
+  expect(res.steps.echo.status).toBe("success");
 });

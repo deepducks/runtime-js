@@ -8,10 +8,10 @@ name: cond
 participants:
   a:
     type: exec
-    command: echo a
+    run: echo a
   b:
     type: exec
-    command: echo b
+    run: echo b
 flow:
   - if:
       condition: true

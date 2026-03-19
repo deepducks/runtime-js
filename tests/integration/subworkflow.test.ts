@@ -37,7 +37,7 @@ output: callChild.output
   const result = await runWorkflowFromFile(parentPath, {});
 
   expect(result.success).toBe(true);
-  expect(result.steps.callChild?.status).toBe("completed");
+  expect(result.steps.callChild?.status).toBe("success");
   expect(String(result.output).includes("child-ok")).toBe(true);
 
   await rm(tempDir, { recursive: true, force: true });

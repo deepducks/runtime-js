@@ -1,24 +1,52 @@
 {
-  "name": "@duckflux/runner",
-  "version": "0.0.0",
+  "name": "@duckflux/runtime",
+  "version": "0.3.0",
   "type": "module",
   "main": "src/index.ts",
   "exports": {
-    ".": "./src/index.ts",
-    "./parser": "./src/parser/index.ts",
-    "./cel": "./src/cel/index.ts",
-    "./engine": "./src/engine/index.ts"
+    ".": {
+      "bun": "./src/index.ts",
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    },
+    "./parser": {
+      "bun": "./src/parser/index.ts",
+      "import": "./dist/parser/index.js",
+      "types": "./dist/parser/index.d.ts"
+    },
+    "./cel": {
+      "bun": "./src/cel/index.ts",
+      "import": "./dist/cel/index.js",
+      "types": "./dist/cel/index.d.ts"
+    },
+    "./engine": {
+      "bun": "./src/engine/index.ts",
+      "import": "./dist/engine/index.js",
+      "types": "./dist/engine/index.d.ts"
+    },
+    "./eventhub": {
+      "bun": "./src/eventhub/index.ts",
+      "import": "./dist/eventhub/index.js",
+      "types": "./dist/eventhub/index.d.ts"
+    }
   },
   "bin": {
     "duckflux": "src/cli/main.ts"
   },
+  "files": [
+    "dist",
+    "src"
+  ],
   "scripts": {
     "test": "bun test",
-    "start": "bun src/index.ts"
+    "start": "bun src/index.ts",
+    "build": "bun build src/index.ts --outdir dist --target node --format esm && tsc --project tsconfig.build.json",
+    "prepublishOnly": "bun run build"
   },
   "devDependencies": {
     "@types/bun": "^1.3.10",
     "@types/node": "^25.3.5",
+    "testcontainers": "^11.13.0",
     "typescript": "^5.2.2"
   },
   "dependencies": {
@@ -26,5 +54,9 @@
     "ajv-formats": "^2.1.1",
     "cel-js": "^0.8.2",
     "yaml": "^2.2.1"
+  },
+  "optionalDependencies": {
+    "nats": "^2.29.3",
+    "ioredis": "^5.10.1"
   }
 }

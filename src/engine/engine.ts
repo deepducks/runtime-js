@@ -9,10 +9,25 @@ import type { WorkflowEngineExecutor } from "../participant/workflow";
 import { executeControlStep } from "./control";
 import { WorkflowState } from "./state";
 
+export interface EventHub {
+  publish(event: string, payload: unknown): Promise<void>;
+  publishAndWaitAck(event: string, payload: unknown, timeoutMs: number): Promise<void>;
+  subscribe(event: string, signal?: AbortSignal): AsyncIterable<{ name: string; payload: unknown }>;
+  close(): Promise<void>;
+}
+
+export interface ExecuteOptions {
+  hub?: EventHub;
+  cwd?: string;
+  verbose?: boolean;
+  quiet?: boolean;
+}
+
 export async function executeWorkflow(
   workflow: Workflow,
   inputs: Record<string, unknown> = {},
   basePath = process.cwd(),
+  options: ExecuteOptions = {},
 ): Promise<WorkflowResult> {
   const { result: inputResult, resolved } = validateInputs(workflow.inputs, inputs);
   if (!inputResult.valid) {
@@ -20,23 +35,43 @@ export async function executeWorkflow(
   }
 
   const state = new WorkflowState(resolved);
+
+  // Set workflow metadata
+  state.workflowMeta = {
+    id: workflow.id,
+    name: workflow.name,
+    version: workflow.version,
+  };
+  if (options.cwd) {
+    state.executionMeta.cwd = options.cwd;
+  }
+
   const startedAt = performance.now();
 
   const engineExecutor: WorkflowEngineExecutor = async (subWorkflow, subInputs, subBasePath) => {
-    return executeWorkflow(subWorkflow, subInputs, subBasePath);
+    // Sub-workflows share parent hub
+    return executeWorkflow(subWorkflow, subInputs, subBasePath, options);
   };
 
+  // Execute flow with chain threading
+  let chain: unknown;
   for (const step of workflow.flow) {
-    await executeControlStep(workflow, state, step, basePath, engineExecutor);
+    chain = await executeControlStep(workflow, state, step, basePath, engineExecutor, chain);
   }
 
-  const output =
-    workflow.output !== undefined
-      ? state.resolveOutput(workflow.output, evaluateCel)
-      : undefined;
+  // Output resolution
+  let output: unknown;
+  if (workflow.output !== undefined) {
+    output = state.resolveOutput(workflow.output, evaluateCel);
+  } else {
+    // Default: return final chain value
+    output = chain;
+  }
 
   const steps = state.getAllResults();
-  const success = !Object.values(steps).some((step) => step.status === "failed");
+  const success = !Object.values(steps).some((step) => step.status === "failure");
+
+  state.executionMeta.status = success ? "success" : "failure";
 
   return {
     success,
@@ -49,6 +84,7 @@ export async function executeWorkflow(
 export async function runWorkflowFromFile(
   filePath: string,
   inputs: Record<string, unknown> = {},
+  options: ExecuteOptions = {},
 ): Promise<WorkflowResult> {
   const workflow = await parseWorkflowFile(filePath);
 
@@ -63,5 +99,5 @@ export async function runWorkflowFromFile(
     throw new Error(`semantic validation failed: ${JSON.stringify(semanticValidation.errors)}`);
   }
 
-  return executeWorkflow(workflow, inputs, workflowBasePath);
+  return executeWorkflow(workflow, inputs, workflowBasePath, options);
 }

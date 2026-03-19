@@ -1,0 +1,9 @@
+name: chain-example
+flow:
+  - type: exec
+    as: producer
+    run: echo '{"message":"hello from producer"}'
+  - type: exec
+    as: consumer
+    run: cat
+output: consumer.output

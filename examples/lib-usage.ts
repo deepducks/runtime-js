@@ -3,21 +3,22 @@ import {
   validateSchema,
   validateSemantic,
   executeWorkflow,
-} from "@duckflux/runner";
+  MemoryHub,
+} from "@duckflux/runtime";
 
+// v0.3: workflow.inputs namespace, inline participants, I/O chain
 const yaml = `
 name: greet
-participants:
-  greeter:
-    type: exec
-    run: sh -c 'name=$(cat -); echo "Hello, $name!"'
-    input: input.name
 inputs:
   name:
     type: string
     required: true
 flow:
-  - greeter
+  # Inline participant — no participants block needed
+  - type: exec
+    as: greeter
+    run: sh -c 'name=$(cat -); echo "Hello, $name!"'
+    input: workflow.inputs.name
 output: greeter.output
 `;
 
@@ -35,5 +36,11 @@ if (!semanticResult.valid) {
   process.exit(1);
 }
 
-const result = await executeWorkflow(workflow, { name: "World" });
+// v0.3: can inject event hub for emit/wait support
+const hub = new MemoryHub();
+
+const result = await executeWorkflow(workflow, { name: "World" }, ".", { hub });
 console.log("Output:", result.output);
+console.log("Success:", result.success);
+
+await hub.close();

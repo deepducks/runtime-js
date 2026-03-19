@@ -8,10 +8,10 @@ name: parallel
 participants:
   slow1:
     type: exec
-    command: sh -c "sleep 0.12; echo 1"
+    run: sh -c "sleep 0.12; echo 1"
   slow2:
     type: exec
-    command: sh -c "sleep 0.12; echo 2"
+    run: sh -c "sleep 0.12; echo 2"
 flow:
   - parallel:
       - slow1

@@ -1,15 +1,17 @@
 export interface Workflow {
+  id?: string;
   name?: string;
   version?: string | number;
   defaults?: WorkflowDefaults;
-  inputs?: Record<string, InputDefinition>;
-  participants: Record<string, Participant>;
+  inputs?: Record<string, InputDefinition | null>;
+  participants?: Record<string, Participant>;
   flow: FlowStep[];
-  output?: string | Record<string, string>;
+  output?: WorkflowOutput;
 }
 
 export interface WorkflowDefaults {
   timeout?: string;
+  cwd?: string;
   onError?: ErrorStrategy;
 }
 
@@ -17,7 +19,7 @@ export type ErrorStrategy = "fail" | "skip" | "retry" | string;
 
 export interface RetryConfig {
   max: number;
-  backoff: string;
+  backoff?: string;
   factor?: number;
 }
 
@@ -32,13 +34,8 @@ export interface ParticipantBase {
   when?: string;
 }
 
-export interface AgentParticipant extends ParticipantBase {
-  type: "agent";
-}
-
 export interface ExecParticipant extends ParticipantBase {
   type: "exec";
-  command?: string;
   run?: string;
   env?: Record<string, string>;
   cwd?: string;
@@ -52,13 +49,10 @@ export interface HttpParticipant extends ParticipantBase {
   body?: string | Record<string, unknown>;
 }
 
-export interface HumanParticipant extends ParticipantBase {
-  type: "human";
-  prompt: string;
-}
-
 export interface McpParticipant extends ParticipantBase {
   type: "mcp";
+  server?: string;
+  tool?: string;
 }
 
 export interface WorkflowParticipant extends ParticipantBase {
@@ -66,20 +60,38 @@ export interface WorkflowParticipant extends ParticipantBase {
   path: string;
 }
 
-export interface HookParticipant extends ParticipantBase {
-  type: "hook";
+export interface EmitParticipant extends ParticipantBase {
+  type: "emit";
+  event: string;
+  payload?: string | Record<string, unknown>;
+  ack?: boolean;
+  onTimeout?: "fail" | "skip";
 }
 
 export type Participant =
-  | AgentParticipant
   | ExecParticipant
   | HttpParticipant
-  | HumanParticipant
   | McpParticipant
   | WorkflowParticipant
-  | HookParticipant;
+  | EmitParticipant;
 
-export type FlowStep = string | FlowStepOverride | LoopStep | ParallelStep | IfStep;
+export type InlineParticipant = Participant & {
+  as?: string;
+  when?: string;
+};
+
+export interface WaitStep {
+  wait: {
+    event?: string;
+    match?: string;
+    until?: string;
+    poll?: string;
+    timeout?: string;
+    onTimeout?: string;
+  };
+}
+
+export type FlowStep = string | FlowStepOverride | LoopStep | ParallelStep | IfStep | WaitStep | InlineParticipant;
 
 export interface FlowStepOverride {
   [participantName: string]: {
@@ -88,13 +100,15 @@ export interface FlowStepOverride {
     when?: string;
     input?: string | Record<string, string>;
     retry?: RetryConfig;
+    workflow?: string;
   };
 }
 
 export interface LoopStep {
   loop: {
+    as?: string;
     until?: string;
-    max?: number;
+    max?: number | string;
     steps: FlowStep[];
   };
 }
@@ -112,18 +126,35 @@ export interface IfStep {
 }
 
 export interface InputDefinition {
-  type: string;
+  type?: string;
   description?: string;
   required?: boolean;
   default?: unknown;
+  format?: string;
+  enum?: unknown[];
+  minimum?: number;
+  maximum?: number;
+  minLength?: number;
+  maxLength?: number;
+  pattern?: string;
+  items?: InputDefinition;
 }
 
+export type WorkflowOutput =
+  | string
+  | Record<string, string>
+  | { schema: Record<string, InputDefinition>; map: Record<string, string> };
+
 export interface StepResult {
-  status: "completed" | "failed" | "skipped";
+  status: "success" | "failure" | "skipped";
   output: string;
   parsedOutput?: unknown;
   error?: string;
   duration: number;
+  startedAt?: string;
+  finishedAt?: string;
+  retries?: number;
+  cwd?: string;
 }
 
 export interface WorkflowResult {

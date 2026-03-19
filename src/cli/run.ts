@@ -1,9 +1,9 @@
 #!/usr/bin/env bun
-import { parse } from "path";
 import { readFile } from "node:fs/promises";
 import { runWorkflowFromFile } from "../engine/engine";
+import type { ExecuteOptions } from "../engine/engine";
 
-type CLIValues = Record<string, any> | undefined;
+type CLIValues = Record<string, unknown> | undefined;
 
 function parseInputFlags(arr: string[] | undefined): Record<string, unknown> {
   const out: Record<string, unknown> = {};
@@ -15,7 +15,6 @@ function parseInputFlags(arr: string[] | undefined): Record<string, unknown> {
     } else {
       const k = item.slice(0, idx);
       const v = item.slice(idx + 1);
-      // try parse JSON values, fallback to string
       try {
         out[k] = JSON.parse(v);
       } catch {
@@ -28,32 +27,16 @@ function parseInputFlags(arr: string[] | undefined): Record<string, unknown> {
 
 export default async function runCommand(filePath?: string, cliValues?: CLIValues): Promise<number> {
   if (!filePath) {
-    console.error("Usage: duckflux run <workflow.yaml> [--input k=v] [--input-file file.json]");
+    console.error("Usage: duckflux run <workflow.yaml> [--input k=v] [--input-file file.json] [--cwd dir]");
     return 1;
   }
 
+  // Input precedence: --input > --input-file > stdin
   let inputs: Record<string, unknown> = {};
 
-  if (cliValues) {
-    if (cliValues.input) {
-      const parsed = Array.isArray(cliValues.input) ? cliValues.input : [cliValues.input];
-      inputs = { ...inputs, ...parseInputFlags(parsed) };
-    }
-    if (cliValues["input-file"]) {
-      try {
-        const content = await readFile(String(cliValues["input-file"]), "utf-8");
-        const parsed = JSON.parse(content);
-        if (typeof parsed === "object" && parsed !== null) inputs = { ...inputs, ...parsed };
-      } catch (err) {
-        console.error("Failed to read input file:", err);
-        return 1;
-      }
-    }
-  }
-
-  // If no inputs and stdin is piped, try to read JSON from stdin
+  // 1. Try stdin first (lowest priority)
   try {
-    if (process.stdin && !process.stdin.isTTY && Object.keys(inputs).length === 0) {
+    if (process.stdin && !process.stdin.isTTY) {
       let stdin = "";
       for await (const chunk of process.stdin) {
         stdin += chunk;
@@ -72,18 +55,52 @@ export default async function runCommand(filePath?: string, cliValues?: CLIValue
     // ignore
   }
 
-  try {
-    const res = await runWorkflowFromFile(filePath, inputs);
-    // print output
-    try {
-      console.log(JSON.stringify(res, null, 2));
-    } catch {
-      console.log(String(res));
+  if (cliValues) {
+    // 2. --input-file (overrides stdin)
+    if (cliValues["input-file"]) {
+      try {
+        const content = await readFile(String(cliValues["input-file"]), "utf-8");
+        const parsed = JSON.parse(content);
+        if (typeof parsed === "object" && parsed !== null) inputs = { ...inputs, ...parsed };
+      } catch (err) {
+        console.error("Failed to read input file:", err);
+        return 1;
+      }
     }
+
+    // 3. --input flags (highest priority)
+    if (cliValues.input) {
+      const parsed = Array.isArray(cliValues.input) ? cliValues.input : [cliValues.input];
+      inputs = { ...inputs, ...parseInputFlags(parsed as string[]) };
+    }
+  }
+
+  const options: ExecuteOptions = {
+    cwd: cliValues?.cwd as string | undefined,
+    verbose: cliValues?.verbose as boolean | undefined,
+    quiet: cliValues?.quiet as boolean | undefined,
+  };
+
+  try {
+    const res = await runWorkflowFromFile(filePath, inputs, options);
+
+    // Print resolved output, not full WorkflowResult
+    const output = res.output;
+    if (output === undefined || output === null) {
+      // No output
+    } else if (typeof output === "string") {
+      process.stdout.write(output);
+    } else {
+      console.log(JSON.stringify(output, null, 2));
+    }
+
     return res.success ? 0 : 2;
-  } catch (err: any) {
-    console.error("Error:", err && err.message ? err.message : err);
-    if (err && err.stack) console.error(err.stack);
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error("Error:", msg);
+    if (cliValues?.verbose && err instanceof Error && err.stack) {
+      console.error(err.stack);
+    }
     return 1;
   }
 }

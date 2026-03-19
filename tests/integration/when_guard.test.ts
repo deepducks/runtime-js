@@ -8,11 +8,11 @@ name: when-guard
 participants:
   maybe:
     type: exec
-    command: echo yes
+    run: echo yes
     when: "false"
   after:
     type: exec
-    command: echo ok
+    run: echo ok
 flow:
   - maybe
   - after
@@ -22,6 +22,6 @@ flow:
   const res = await executeWorkflow(wf, {});
   expect(res.success).toBe(true);
   expect(res.steps.maybe).toBeDefined();
-  expect((res.steps.maybe as any).status).toBe("skipped");
+  expect(res.steps.maybe.status).toBe("skipped");
   expect(res.steps.after).toBeDefined();
 });

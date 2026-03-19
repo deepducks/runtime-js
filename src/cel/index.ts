@@ -1,7 +1,19 @@
 import { evaluate, parse } from "cel-js";
 
+// Expression cache: parsed AST reuse
+const expressionCache = new Map<string, ReturnType<typeof parse>>();
+
+function getParsed(expr: string): ReturnType<typeof parse> {
+  let cached = expressionCache.get(expr);
+  if (!cached) {
+    cached = parse(expr);
+    expressionCache.set(expr, cached);
+  }
+  return cached;
+}
+
 export function validateCelExpression(expr: string): { valid: boolean; error?: string } {
-  const parsed = parse(expr);
+  const parsed = getParsed(expr);
   if (parsed.isSuccess) {
     return { valid: true };
   }
@@ -17,22 +29,53 @@ export function evaluateCel(expr: unknown, context: Record<string, unknown>): un
     return expr;
   }
 
-  const parsed = parse(expr);
+  const parsed = getParsed(expr);
   if (!parsed.isSuccess) {
     throw new Error(parsed.errors.join("; "));
   }
 
-  return evaluate(parsed.cst, context);
+  // Inject custom functions into context
+  const enrichedContext: Record<string, unknown> = {
+    ...context,
+    // Custom timestamp function: converts ISO string to epoch seconds
+    timestamp: (s: string) => {
+      const d = new Date(s);
+      if (Number.isNaN(d.getTime())) throw new Error(`invalid timestamp: ${s}`);
+      return Math.floor(d.getTime() / 1000);
+    },
+    // Custom duration function: converts duration string to seconds
+    duration: (s: string) => {
+      const match = s.match(/^(\d+)(ms|s|m|h|d)$/);
+      if (!match) throw new Error(`invalid duration: ${s}`);
+      const val = Number(match[1]);
+      switch (match[2]) {
+        case "ms": return val / 1000;
+        case "s": return val;
+        case "m": return val * 60;
+        case "h": return val * 3600;
+        case "d": return val * 86400;
+        default: throw new Error(`invalid duration unit: ${match[2]}`);
+      }
+    },
+  };
+
+  return evaluate(parsed.cst, enrichedContext);
 }
 
-type CelContextLike = {
+export function evaluateCelStrict(expr: string, context: Record<string, unknown>): boolean {
+  const result = evaluateCel(expr, context);
+  if (typeof result !== "boolean") {
+    throw new Error(`CEL expression must evaluate to boolean, got ${typeof result}: ${expr}`);
+  }
+  return result;
+}
+
+export function buildCelContext(state: {
   toCelContext?: () => Record<string, unknown>;
   getAllResults?: () => Record<string, { output?: unknown; parsedOutput?: unknown; status: string }>;
   inputs?: Record<string, unknown>;
   currentLoopIndex?: () => number;
-};
-
-export function buildCelContext(state: CelContextLike): Record<string, unknown> {
+}): Record<string, unknown> {
   if (typeof state.toCelContext === "function") {
     return state.toCelContext();
   }

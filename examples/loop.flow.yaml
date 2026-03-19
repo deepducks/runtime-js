@@ -1,0 +1,10 @@
+name: loop-example
+participants:
+  tick:
+    type: exec
+    run: echo "tick"
+flow:
+  - loop:
+      max: 3
+      steps:
+        - tick

@@ -8,7 +8,7 @@ name: loop-until
 participants:
   echo:
     type: exec
-    command: echo iter
+    run: echo iter
 flow:
   - loop:
       until: true

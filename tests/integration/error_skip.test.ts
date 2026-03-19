@@ -8,11 +8,11 @@ name: skip-on-error
 participants:
   flaky:
     type: exec
-    command: sh -c "echo boom >&2; exit 1"
+    run: sh -c "echo boom >&2; exit 1"
     onError: skip
   after:
     type: exec
-    command: echo after
+    run: echo after
 flow:
   - flaky
   - after
@@ -23,5 +23,5 @@ flow:
 
   expect(result.success).toBe(true);
   expect(result.steps.flaky?.status).toBe("skipped");
-  expect(result.steps.after?.status).toBe("completed");
+  expect(result.steps.after?.status).toBe("success");
 });

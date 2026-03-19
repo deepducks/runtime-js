@@ -3,7 +3,6 @@ import { executeSubWorkflow } from "./workflow";
 import type { WorkflowEngineExecutor } from "./workflow";
 import { executeExec } from "./exec";
 import executeHttp from "./http";
-import executeHuman from "./human";
 
 export type ExecutorFunction = (
   participant: Participant,
@@ -22,7 +21,6 @@ const notImplemented = (type: string): ExecutorFunction => {
 const executors: Record<string, ExecutorFunction> = {
   exec: async (participant, input, env) => executeExec(participant, input, env),
   http: async (participant, input) => executeHttp(participant, input as string | undefined),
-  human: async (participant, input) => executeHuman(participant, input),
   workflow: async (participant, input, _env, basePath, engineExecutor) => {
     if (!basePath) {
       throw new Error("workflow participant execution requires basePath");
@@ -32,9 +30,8 @@ const executors: Record<string, ExecutorFunction> = {
     }
     return executeSubWorkflow(participant as WorkflowParticipant, input, basePath, engineExecutor);
   },
-  agent: notImplemented("agent"),
   mcp: notImplemented("mcp"),
-  hook: notImplemented("hook"),
+  emit: notImplemented("emit"),
 };
 
 export async function executeParticipant(

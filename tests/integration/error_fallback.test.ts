@@ -8,11 +8,11 @@ name: fallback-on-error
 participants:
   main:
     type: exec
-    command: sh -c "echo fail >&2; exit 1"
+    run: sh -c "echo fail >&2; exit 1"
     onError: fixer
   fixer:
     type: exec
-    command: echo fixed
+    run: echo fixed
 flow:
   - main
 `;
@@ -20,8 +20,10 @@ flow:
   const workflow = parseWorkflow(yaml);
   const result = await executeWorkflow(workflow, {});
 
-  expect(result.success).toBe(true);
-  expect(result.steps.fixer?.status).toBe("completed");
-  expect(result.steps.main?.status).toBe("completed");
-  expect(result.steps.main?.output.includes("fixed")).toBe(true);
+  expect(result.success).toBe(false);
+  // v0.3: original step preserved as failure (Go runner behavior)
+  expect(result.steps.main?.status).toBe("failure");
+  // Fixer ran successfully
+  expect(result.steps.fixer?.status).toBe("success");
+  expect(result.steps.fixer?.output.includes("fixed")).toBe(true);
 });

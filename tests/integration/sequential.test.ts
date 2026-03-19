@@ -8,13 +8,13 @@ name: seq-integration
 participants:
   a:
     type: exec
-    command: echo a
+    run: echo a
   b:
     type: exec
-    command: echo b
+    run: echo b
   c:
     type: exec
-    command: echo c
+    run: echo c
 flow:
   - a
   - b
@@ -29,8 +29,8 @@ output: a.output
   expect(res.steps.a).toBeDefined();
   expect(res.steps.b).toBeDefined();
   expect(res.steps.c).toBeDefined();
-  expect((res.steps.a as any).status).toBe("completed");
-  expect((res.steps.b as any).status).toBe("completed");
-  expect((res.steps.c as any).status).toBe("completed");
-  expect(String(res.output).includes("a") || String(res.output).includes("a\n")).toBe(true);
+  expect(res.steps.a.status).toBe("success");
+  expect(res.steps.b.status).toBe("success");
+  expect(res.steps.c.status).toBe("success");
+  expect(String(res.output).includes("a")).toBe(true);
 });

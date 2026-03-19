@@ -1,0 +1,12 @@
+name: parallel-example
+participants:
+  fast1:
+    type: exec
+    run: echo "branch 1"
+  fast2:
+    type: exec
+    run: echo "branch 2"
+flow:
+  - parallel:
+      - fast1
+      - fast2

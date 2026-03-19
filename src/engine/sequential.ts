@@ -4,12 +4,11 @@ import type {
   Participant,
   StepResult,
   Workflow,
-  WorkflowResult,
 } from "../model/index";
 import { executeParticipant } from "../participant/index";
 import type { WorkflowEngineExecutor } from "../participant/workflow";
 import { executeWithRetry, resolveErrorStrategy } from "./errors";
-import { WorkflowState } from "./state";
+import type { WorkflowState } from "./state";
 import { resolveTimeout, withTimeout } from "./timeout";
 
 function isControlFlowStep(step: unknown): boolean {
@@ -18,7 +17,14 @@ function isControlFlowStep(step: unknown): boolean {
   }
 
   const keys = Object.keys(step as Record<string, unknown>);
-  return keys.length === 1 && ["loop", "parallel", "if"].includes(keys[0]);
+  return keys.length === 1 && ["loop", "parallel", "if", "wait"].includes(keys[0]);
+}
+
+function isInlineParticipant(step: unknown): boolean {
+  if (typeof step !== "object" || step == null || Array.isArray(step)) {
+    return false;
+  }
+  return "type" in (step as Record<string, unknown>);
 }
 
 function resolveParticipantInput(
@@ -40,6 +46,25 @@ function resolveParticipantInput(
   return resolved;
 }
 
+export function mergeChainedInput(chain: unknown, explicit: unknown): unknown {
+  if (explicit === undefined || explicit === null) return chain;
+  if (chain === undefined || chain === null) return explicit;
+
+  const chainIsMap = typeof chain === "object" && !Array.isArray(chain);
+  const explicitIsMap = typeof explicit === "object" && !Array.isArray(explicit);
+
+  if (chainIsMap && explicitIsMap) {
+    return { ...(chain as Record<string, unknown>), ...(explicit as Record<string, unknown>) };
+  }
+
+  if (typeof chain === "string" && typeof explicit === "string") {
+    return explicit;
+  }
+
+  // Incompatible types: explicit wins
+  return explicit;
+}
+
 type FlowOverride = {
   timeout?: string;
   onError?: ErrorStrategy;
@@ -47,7 +72,7 @@ type FlowOverride = {
   input?: string | Record<string, string>;
   retry?: {
     max: number;
-    backoff: string;
+    backoff?: string;
     factor?: number;
   };
 };
@@ -59,68 +84,93 @@ export async function executeStep(
   basePath = process.cwd(),
   engineExecutor?: WorkflowEngineExecutor,
   fallbackStack: string[] = [],
-): Promise<void> {
+  chain?: unknown,
+): Promise<unknown> {
   if (isControlFlowStep(step)) {
     throw new Error("control-flow construct passed to executeStep");
   }
 
-  let stepName: string;
+  let stepName: string | undefined;
+  let participant: Participant;
   let override: FlowOverride | undefined;
 
   if (typeof step === "string") {
+    // Named participant reference
     stepName = step;
+    const p = workflow.participants?.[stepName];
+    if (!p) {
+      throw new Error(`participant '${stepName}' not found`);
+    }
+    participant = p;
+  } else if (isInlineParticipant(step)) {
+    // Inline participant
+    const inline = step as Participant & { as?: string; when?: string };
+    stepName = inline.as;
+    participant = inline;
   } else if (typeof step === "object" && step != null && !Array.isArray(step)) {
+    // Participant override
     const keys = Object.keys(step);
     if (keys.length !== 1) {
       throw new Error("invalid flow step override");
     }
     stepName = keys[0];
     override = (step as Record<string, FlowOverride>)[stepName];
+    const p = workflow.participants?.[stepName];
+    if (!p) {
+      throw new Error(`participant '${stepName}' not found`);
+    }
+    participant = p;
   } else {
     throw new Error("invalid flow step");
-  }
-
-  const participant = workflow.participants[stepName] as Participant | undefined;
-  if (!participant) {
-    throw new Error(`participant '${stepName}' not found`);
   }
 
   const mergedParticipant: Participant = {
     ...participant,
     ...(override ?? {}),
-  };
+  } as Participant;
 
+  // When guard - boolean strictness
   const whenExpression = override?.when ?? participant.when;
   if (whenExpression) {
-    const shouldRun = Boolean(evaluateCel(whenExpression, state.toCelContext()));
-    if (!shouldRun) {
-      state.setResult(stepName, {
-        status: "skipped",
-        output: "",
-        duration: 0,
-      });
-      return;
+    const shouldRun = evaluateCel(whenExpression, state.toCelContext());
+    if (shouldRun !== true) {
+      if (stepName) {
+        state.setResult(stepName, {
+          status: "skipped",
+          output: "",
+          duration: 0,
+        });
+      }
+      return chain; // Skipped steps preserve chain
     }
   }
 
+  // Resolve explicit input and merge with chain
   const inputMapping = override?.input ?? participant.input;
-  const resolvedInput = resolveParticipantInput(inputMapping, state);
+  const explicitInput = resolveParticipantInput(inputMapping, state);
+  const mergedInput = mergeChainedInput(chain, explicitInput);
+
+  // Set participant-scoped input in state
+  state.currentInput = mergedInput;
+
   const strategy = resolveErrorStrategy(override ?? null, participant, workflow.defaults ?? null);
   const timeoutMs = resolveTimeout(override ?? null, participant, workflow.defaults ?? null);
   const retryConfig = strategy === "retry" ? mergedParticipant.retry : undefined;
+
+  const startedAt = new Date().toISOString();
 
   const executeOnce = async (): Promise<StepResult> => {
     const invoke = async (): Promise<StepResult> => {
       const result = await executeParticipant(
         mergedParticipant,
-        resolvedInput,
+        mergedInput,
         {},
         basePath,
         engineExecutor,
       );
 
-      if (result.status === "failed") {
-        throw new Error(result.error || `participant '${stepName}' failed`);
+      if (result.status === "failure") {
+        throw new Error(result.error || `participant '${stepName ?? "anonymous"}' failed`);
       }
 
       return result;
@@ -134,55 +184,90 @@ export async function executeStep(
   };
 
   try {
-    const result =
-      strategy === "retry"
-        ? (await executeWithRetry(executeOnce, retryConfig, stepName)).result
-        : await executeOnce();
+    let result: StepResult;
+    let retries = 0;
+    if (strategy === "retry") {
+      const retryResult = await executeWithRetry(executeOnce, retryConfig, stepName ?? "<anonymous>");
+      result = retryResult.result;
+      retries = retryResult.attempts;
+    } else {
+      result = await executeOnce();
+    }
 
-    state.setResult(stepName, result);
+    result.startedAt = result.startedAt ?? startedAt;
+    result.finishedAt = result.finishedAt ?? new Date().toISOString();
+    result.retries = retries;
+
+    if (stepName) {
+      state.setResult(stepName, result);
+    }
+
+    // Update participant-scoped output and chain
+    const outputValue = result.parsedOutput ?? result.output;
+    state.currentOutput = outputValue;
+    return outputValue;
   } catch (error) {
     const message = String((error as Error)?.message ?? error);
+    const finishedAt = new Date().toISOString();
 
     if (strategy === "skip") {
-      state.setResult(stepName, {
+      const skipResult: StepResult = {
         status: "skipped",
         output: "",
         error: message,
         duration: 0,
-      });
-      return;
+        startedAt,
+        finishedAt,
+      };
+      if (stepName) {
+        state.setResult(stepName, skipResult);
+      }
+      return chain; // Skipped steps preserve chain
     }
 
     if (strategy !== "fail" && strategy !== "retry") {
+      // Fallback to another participant
       const fallbackName = strategy;
       if (fallbackStack.includes(fallbackName)) {
         throw new Error(`fallback cycle detected on participant '${fallbackName}'`);
       }
 
-      await executeStep(
+      // Keep original step as failure (Go runner behavior)
+      if (stepName) {
+        state.setResult(stepName, {
+          status: "failure",
+          output: "",
+          error: message,
+          duration: 0,
+          startedAt,
+          finishedAt,
+        });
+      }
+
+      // Execute fallback
+      const fallbackResult = await executeStep(
         workflow,
         state,
         fallbackName,
         basePath,
         engineExecutor,
-        [...fallbackStack, stepName],
+        [...fallbackStack, stepName ?? "<anonymous>"],
+        chain,
       );
 
-      const fallbackResult = state.getResult(fallbackName);
-      if (!fallbackResult) {
-        throw new Error(`fallback participant '${fallbackName}' produced no result`);
-      }
-
-      state.setResult(stepName, fallbackResult);
-      return;
+      return fallbackResult;
     }
 
-    state.setResult(stepName, {
-      status: "failed",
-      output: "",
-      error: message,
-      duration: 0,
-    });
+    if (stepName) {
+      state.setResult(stepName, {
+        status: "failure",
+        output: "",
+        error: message,
+        duration: 0,
+        startedAt,
+        finishedAt,
+      });
+    }
 
     throw error;
   }
@@ -191,10 +276,16 @@ export async function executeStep(
 export async function executeSequential(
   workflow: Workflow,
   state: WorkflowState,
+  steps: unknown[],
   basePath = process.cwd(),
   engineExecutor?: WorkflowEngineExecutor,
-): Promise<void> {
-  for (const step of workflow.flow) {
-    await executeStep(workflow, state, step, basePath, engineExecutor);
+  chain?: unknown,
+): Promise<unknown> {
+  let currentChain = chain;
+  for (const step of steps) {
+    // Import executeControlStep dynamically to avoid circular dependency
+    const { executeControlStep } = await import("./control");
+    currentChain = await executeControlStep(workflow, state, step, basePath, engineExecutor, currentChain);
   }
+  return currentChain;
 }
