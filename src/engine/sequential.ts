@@ -145,10 +145,14 @@ export async function executeStep(
     }
   }
 
-  // Resolve explicit input and merge with chain
-  const inputMapping = override?.input ?? participant.input;
-  const explicitInput = resolveParticipantInput(inputMapping, state);
-  const mergedInput = mergeChainedInput(chain, explicitInput);
+  // Resolve participant base input and flow override input separately,
+  // then merge per v0.5 spec: chain < participant base input < flow override input.
+  const baseInput = resolveParticipantInput(participant.input, state);
+  const overrideInput = override?.input !== undefined
+    ? resolveParticipantInput(override.input, state)
+    : undefined;
+  const mergedWithBase = mergeChainedInput(chain, baseInput);
+  const mergedInput = mergeChainedInput(mergedWithBase, overrideInput);
 
   // Set participant-scoped input in state
   state.currentInput = mergedInput;

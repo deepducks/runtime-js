@@ -58,3 +58,96 @@ flow:
   const arr = res.output as unknown[];
   expect(arr.length).toBe(2);
 });
+
+// --- v0.5 Input Merge on Flow Override ---
+
+test("integration: v0.5 flow override input merges with participant base input", async () => {
+  const yaml = `
+participants:
+  worker:
+    type: exec
+    run: cat
+    input:
+      A: '"base-a"'
+flow:
+  - worker:
+      input:
+        B: '"override-b"'
+`;
+  const wf = parseWorkflow(yaml);
+  const res = await executeWorkflow(wf, {});
+  expect(res.success).toBe(true);
+  const output = res.output as Record<string, unknown>;
+  expect(output.A).toBe("base-a");
+  expect(output.B).toBe("override-b");
+});
+
+test("integration: v0.5 flow override input wins on key conflict", async () => {
+  const yaml = `
+participants:
+  worker:
+    type: exec
+    run: cat
+    input:
+      X: '"base"'
+flow:
+  - worker:
+      input:
+        X: '"override"'
+`;
+  const wf = parseWorkflow(yaml);
+  const res = await executeWorkflow(wf, {});
+  expect(res.success).toBe(true);
+  const output = res.output as Record<string, unknown>;
+  expect(output.X).toBe("override");
+});
+
+test("integration: v0.5 three-way merge chain + base + override", async () => {
+  const yaml = `
+participants:
+  produce:
+    type: exec
+    run: printf '{"C":"chain-c"}'
+  consume:
+    type: exec
+    run: cat
+    input:
+      B: '"base-b"'
+flow:
+  - produce
+  - consume:
+      input:
+        O: '"override-o"'
+`;
+  const wf = parseWorkflow(yaml);
+  const res = await executeWorkflow(wf, {});
+  expect(res.success).toBe(true);
+  const output = res.output as Record<string, unknown>;
+  expect(output.C).toBe("chain-c");
+  expect(output.B).toBe("base-b");
+  expect(output.O).toBe("override-o");
+});
+
+test("integration: v0.5 three-way merge conflict precedence (override > base > chain)", async () => {
+  const yaml = `
+participants:
+  produce:
+    type: exec
+    run: printf '{"K":"from-chain"}'
+  consume:
+    type: exec
+    run: cat
+    input:
+      K: '"from-base"'
+flow:
+  - produce
+  - consume:
+      input:
+        K: '"from-override"'
+`;
+  const wf = parseWorkflow(yaml);
+  const res = await executeWorkflow(wf, {});
+  expect(res.success).toBe(true);
+  const output = res.output as Record<string, unknown>;
+  expect(output.K).toBe("from-override");
+});
