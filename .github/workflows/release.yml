@@ -81,8 +81,11 @@ jobs:
         run: bun build src/index.ts src/parser/index.ts src/cel/index.ts src/engine/index.ts src/eventhub/index.ts --outdir dist --target node --format esm
         working-directory: packages/core
 
-      - name: Build @duckflux/runner
-        run: bun run --filter @duckflux/runner build
+      - name: Build @duckflux/runner (JS only, skip tsc)
+        run: |
+          bun build src/main.ts --outdir dist --target node --format esm --banner '#!/usr/bin/env node'
+          chmod +x dist/main.js
+        working-directory: packages/runner
 
       - name: Configure npm auth
         run: echo "//registry.npmjs.org/:_authToken=${NPM_TOKEN}" >> ~/.npmrc
