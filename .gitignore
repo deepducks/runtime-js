@@ -2,6 +2,7 @@ node_modules
 dist
 .bun
 /.cache
+packages/runner/bin/
 # Logs
 logs
 *.log

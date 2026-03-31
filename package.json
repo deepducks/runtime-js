@@ -4,7 +4,8 @@
   "workspaces": ["packages/*"],
   "scripts": {
     "test": "bun --filter '*' test",
-    "build": "bun --filter '*' build"
+    "build": "bun --filter '*' build",
+    "compile": "bun run --cwd packages/runner compile"
   },
   "devDependencies": {
     "@types/bun": "^1.3.10",

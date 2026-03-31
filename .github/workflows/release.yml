@@ -1,0 +1,96 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  release-binaries:
+    name: Compile & publish GitHub Release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Compile all platform binaries
+        run: bun run compile
+        working-directory: packages/runner
+
+      - name: Create GitHub Release and upload binaries
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "duckflux JS runtime ${{ github.ref_name }}"
+          body: |
+            ## duckflux JS runtime ${{ github.ref_name }}
+
+            ### Standalone binaries (no Bun/Node required)
+
+            Download the binary for your platform, make it executable and add it to your `PATH`.
+
+            | Platform | File |
+            |---|---|
+            | Linux x64 | `duckflux-linux-x64` |
+            | Linux ARM64 | `duckflux-linux-arm64` |
+            | macOS x64 | `duckflux-darwin-x64` |
+            | macOS ARM64 | `duckflux-darwin-arm64` |
+            | Windows x64 | `duckflux-windows-x64.exe` |
+
+            ### via npm / npx
+
+            ```sh
+            npx duckflux run workflow.yaml
+            bunx duckflux run workflow.yaml
+            ```
+
+            Or install globally:
+            ```sh
+            npm install -g duckflux
+            ```
+          files: packages/runner/bin/*
+          fail_on_unmatched_files: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  publish-npm:
+    name: Publish to npm
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Build @duckflux/runner
+        run: bun run build
+        working-directory: packages/runner
+
+      - name: Configure npm auth
+        run: echo "//registry.npmjs.org/:_authToken=${NPM_TOKEN}" >> ~/.npmrc
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Publish @duckflux/runner
+        run: bun publish --access public
+        working-directory: packages/runner
+
+      - name: Publish duckflux (thin CLI wrapper)
+        run: bun publish --access public
+        working-directory: packages/cli
+        # @duckflux/runner must be published first so npm can resolve the dependency
