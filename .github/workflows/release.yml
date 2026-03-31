@@ -93,10 +93,10 @@ jobs:
           NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Publish @duckflux/runner
-        run: bun publish --access public
+        run: npm publish --access public --ignore-scripts
         working-directory: packages/runner
 
       - name: Publish duckflux (thin CLI wrapper)
-        run: bun publish --access public
+        run: npm publish --access public --ignore-scripts
         working-directory: packages/cli
         # @duckflux/runner must be published first so npm can resolve the dependency
