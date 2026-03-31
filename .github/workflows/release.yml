@@ -78,8 +78,7 @@ jobs:
         run: bun install --frozen-lockfile
 
       - name: Build @duckflux/runner
-        run: bun run build
-        working-directory: packages/runner
+        run: bun run --filter @duckflux/runner build
 
       - name: Configure npm auth
         run: echo "//registry.npmjs.org/:_authToken=${NPM_TOKEN}" >> ~/.npmrc
