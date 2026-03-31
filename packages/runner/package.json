@@ -1,0 +1,23 @@
+{
+  "name": "@duckflux/runner",
+  "version": "0.6.0",
+  "type": "module",
+  "bin": {
+    "duckflux": "src/main.ts"
+  },
+  "files": [
+    "dist",
+    "src"
+  ],
+  "scripts": {
+    "build": "bun build src/main.ts --outdir dist --target node --format esm && tsc --project tsconfig.build.json",
+    "prepublishOnly": "bun run build"
+  },
+  "dependencies": {
+    "@duckflux/core": "workspace:*"
+  },
+  "optionalDependencies": {
+    "@duckflux/hub-nats": "workspace:*",
+    "@duckflux/hub-redis": "workspace:*"
+  }
+}

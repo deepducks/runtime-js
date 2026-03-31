@@ -1,0 +1,48 @@
+{
+  "name": "@duckflux/core",
+  "version": "0.6.0",
+  "type": "module",
+  "main": "src/index.ts",
+  "exports": {
+    ".": {
+      "bun": "./src/index.ts",
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    },
+    "./parser": {
+      "bun": "./src/parser/index.ts",
+      "import": "./dist/parser/index.js",
+      "types": "./dist/parser/index.d.ts"
+    },
+    "./cel": {
+      "bun": "./src/cel/index.ts",
+      "import": "./dist/cel/index.js",
+      "types": "./dist/cel/index.d.ts"
+    },
+    "./engine": {
+      "bun": "./src/engine/index.ts",
+      "import": "./dist/engine/index.js",
+      "types": "./dist/engine/index.d.ts"
+    },
+    "./eventhub": {
+      "bun": "./src/eventhub/index.ts",
+      "import": "./dist/eventhub/index.js",
+      "types": "./dist/eventhub/index.d.ts"
+    }
+  },
+  "files": [
+    "dist",
+    "src"
+  ],
+  "scripts": {
+    "test": "bun test",
+    "build": "bun build src/index.ts --outdir dist --target node --format esm && tsc --project tsconfig.build.json",
+    "prepublishOnly": "bun run build"
+  },
+  "dependencies": {
+    "ajv": "^8.12.0",
+    "ajv-formats": "^2.1.1",
+    "cel-js": "^0.8.2",
+    "yaml": "^2.2.1"
+  }
+}

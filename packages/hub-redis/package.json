@@ -1,0 +1,28 @@
+{
+  "name": "@duckflux/hub-redis",
+  "version": "0.6.0",
+  "type": "module",
+  "main": "src/index.ts",
+  "exports": {
+    ".": {
+      "bun": "./src/index.ts",
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "files": [
+    "dist",
+    "src"
+  ],
+  "scripts": {
+    "test": "bun test",
+    "build": "bun build src/index.ts --outdir dist --target node --format esm && tsc --project tsconfig.build.json",
+    "prepublishOnly": "bun run build"
+  },
+  "dependencies": {
+    "ioredis": "^5.10.1"
+  },
+  "peerDependencies": {
+    "@duckflux/core": "^0.6.0"
+  }
+}

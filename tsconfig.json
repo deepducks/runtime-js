@@ -5,8 +5,6 @@
     "module": "ESNext",
     "moduleResolution": "bundler",
     "esModuleInterop": true,
-    "skipLibCheck": true,
-    "outDir": "dist"
-  },
-  "include": ["src/**/*.ts"]
+    "skipLibCheck": true
+  }
 }

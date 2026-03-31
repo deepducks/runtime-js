@@ -1,17 +1,30 @@
-# @duckflux/runtime
+# @duckflux/core & @duckflux/runner
 
-JavaScript/TypeScript runtime for [duckflux](https://duckflux.dev) workflows. Dual-purpose: **CLI tool** and **importable library**.
+TypeScript runtime for [duckflux](https://docs.duckflux.openvibes.tech/javascript-runtime/) workflows. Dual-purpose: **CLI tool** (`@duckflux/runner`) and **importable library** (`@duckflux/core`).
 
-Spec version: **v0.4**
+Spec version: **v0.6**
+
+## Packages
+
+| Package | Description |
+|---------|-------------|
+| `@duckflux/core` | Engine, parser, CEL, event hub (in-memory) |
+| `@duckflux/runner` | CLI tool (`duckflux run`, `duckflux lint`, `duckflux validate`) |
+| `@duckflux/hub-nats` | Optional NATS JetStream event hub backend |
+| `@duckflux/hub-redis` | Optional Redis Streams event hub backend |
 
 ## Installation
 
 ```bash
-# With Bun (recommended)
-bun add @duckflux/runtime
+# Core library
+bun add @duckflux/core
 
-# With npm
-npm install @duckflux/runtime
+# CLI runner
+bun add @duckflux/runner
+
+# Optional event hub backends
+bun add @duckflux/hub-nats
+bun add @duckflux/hub-redis
 ```
 
 ## CLI Usage
@@ -41,7 +54,7 @@ duckflux version
 ### Event Hub Flags
 
 ```bash
-duckflux run workflow.yaml --event-backend memory   # default
+duckflux run workflow.yaml --event-backend memory   # default (in-memory MemoryHub)
 duckflux run workflow.yaml --event-backend nats --nats-url nats://localhost:4222
 duckflux run workflow.yaml --event-backend redis --redis-addr localhost:6379
 ```
@@ -54,8 +67,8 @@ import {
   validateSchema,
   validateSemantic,
   executeWorkflow,
-  MemoryHub,
-} from "@duckflux/runtime";
+} from "@duckflux/core";
+import { MemoryHub } from "@duckflux/core/eventhub";
 
 const yaml = `
 flow:
@@ -71,7 +84,7 @@ const workflow = parseWorkflow(yaml);
 const schema = validateSchema(workflow);
 const semantic = await validateSemantic(workflow, ".");
 
-// Execute with optional event hub
+// Execute with event hub
 const hub = new MemoryHub();
 const result = await executeWorkflow(workflow, {}, ".", { hub });
 
@@ -84,39 +97,45 @@ await hub.close();
 ### Sub-module Imports
 
 ```typescript
-import { parseWorkflow } from "@duckflux/runtime/parser";
-import { evaluateCel } from "@duckflux/runtime/cel";
-import { executeWorkflow } from "@duckflux/runtime/engine";
-import { createHub, MemoryHub } from "@duckflux/runtime/eventhub";
+import { parseWorkflow } from "@duckflux/core/parser";
+import { evaluateCel } from "@duckflux/core/cel";
+import { executeWorkflow } from "@duckflux/core/engine";
+import { MemoryHub } from "@duckflux/core/eventhub";
 ```
 
-## Spec v0.4 Features
+## Spec v0.6 Features
 
-- **`set` construct** — write values to `execution.context` via CEL expressions; a flow-level control operation transparent to the I/O chain
+- **Participant types** — `exec`, `http`, `emit`, `workflow` (+ `mcp` stub)
+- **Exec input semantics** (v0.6) — map input becomes env vars, string input becomes stdin
+- **Input merge on flow override** (v0.5) — chain < participant base input < flow override input
+- **`set` construct** — write values to `execution.context` via CEL expressions
 - **Inline participants** — define steps directly in the flow without a `participants` block
-- **Anonymous inline** — omit `as` for unnamed steps; output accessible only via implicit I/O chain
 - **Implicit I/O chain** — step output automatically flows as input to the next step
 - **`wait` steps** — sleep, poll conditions, or wait for events
 - **`emit` participant** — publish events with optional acknowledgment
-- **Event hub** — in-memory, NATS JetStream, or Redis Streams backends
+- **Event hub** — in-memory (default), NATS JetStream, or Redis Streams backends
+- **`loop`** — with `max`, `until`, and `as` (renamed loop context)
+- **`parallel`** — concurrent branch execution with abort on failure
+- **`if`/`else`** — conditional flow
+- **`when` guard** — skip steps based on CEL condition
 - **`workflow.inputs.*`** namespace — inputs accessed as `workflow.inputs.<field>` in CEL
 - **Participant-scoped `input`/`output`** — `input` and `output` in CEL refer to the current step
-- **`loop.as`** — rename the loop context variable
 - **Boolean strictness** — `if.condition`, `when`, `loop.until` must evaluate to boolean
 - **Input coercion & constraints** — `enum`, `min`, `max`, `pattern`, `format`, etc.
 - **CWD precedence** — `participant.cwd` > `defaults.cwd` > `--cwd` > `process.cwd()`
-- **Default output** — if no `output:` defined, returns final chain value
-- **Parallel output** — ordered array of branch outputs
+- **Error strategies** — `fail`, `skip`, `retry` (exponential backoff), redirect to fallback participant
+- **Timeout resolution** — flow override > participant > defaults > none
+- **Output schema validation** — validate step and workflow output against schema definitions
+- **Circular sub-workflow detection** — prevents infinite recursion in nested workflows
+- **CEL standard library** — `has`, `size`, `matches`, `contains`, `startsWith`, `endsWith`, `lowerAscii`, `upperAscii`, `replace`, `split`, `join`, `filter`, `map`, `exists`, `exists_one`, `all`, `timestamp`, `duration`
 
 ## Event Hub Backends
 
 | Backend | Package | Use Case |
 |---------|---------|----------|
-| `memory` | built-in | Development, testing, single-process |
-| `nats` | `nats` (optional) | Distributed, multi-process |
-| `redis` | `ioredis` (optional) | Distributed with persistence |
-
-NATS and Redis packages are optional dependencies — install them only if needed.
+| `memory` | `@duckflux/core` (built-in) | Development, testing, single-process |
+| `nats` | `@duckflux/hub-nats` | Distributed, multi-process |
+| `redis` | `@duckflux/hub-redis` | Distributed with persistence |
 
 ## Development
 

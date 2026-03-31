@@ -3,21 +3,55 @@
   "workspaces": {
     "": {
       "name": "@duckflux/runner",
-      "dependencies": {
-        "ajv": "^8.12.0",
-        "ajv-formats": "^2.1.1",
-        "cel-js": "^0.8.2",
-        "yaml": "^2.2.1",
-      },
       "devDependencies": {
         "@types/bun": "^1.3.10",
         "@types/node": "^25.3.5",
         "testcontainers": "^11.13.0",
         "typescript": "^5.2.2",
       },
-      "optionalDependencies": {
-        "ioredis": "^5.10.1",
+    },
+    "packages/core": {
+      "name": "@duckflux/core",
+      "version": "0.6.0",
+      "dependencies": {
+        "ajv": "^8.12.0",
+        "ajv-formats": "^2.1.1",
+        "cel-js": "^0.8.2",
+        "yaml": "^2.2.1",
+      },
+    },
+    "packages/hub-nats": {
+      "name": "@duckflux/hub-nats",
+      "version": "0.6.0",
+      "dependencies": {
         "nats": "^2.29.3",
+      },
+      "peerDependencies": {
+        "@duckflux/core": "^0.6.0",
+      },
+    },
+    "packages/hub-redis": {
+      "name": "@duckflux/hub-redis",
+      "version": "0.6.0",
+      "dependencies": {
+        "ioredis": "^5.10.1",
+      },
+      "peerDependencies": {
+        "@duckflux/core": "^0.6.0",
+      },
+    },
+    "packages/runner": {
+      "name": "@duckflux/runner",
+      "version": "0.6.0",
+      "bin": {
+        "duckflux": "src/main.ts",
+      },
+      "dependencies": {
+        "@duckflux/core": "workspace:*",
+      },
+      "optionalDependencies": {
+        "@duckflux/hub-nats": "workspace:*",
+        "@duckflux/hub-redis": "workspace:*",
       },
     },
   },
@@ -33,6 +67,14 @@
     "@chevrotain/types": ["@chevrotain/types@11.0.3", "", {}, "sha512-gsiM3G8b58kZC2HaWR50gu6Y1440cHiJ+i3JUvcp/35JchYejb2+5MVeJK0iKThYpAa/P2PYFV4hoi44HD+aHQ=="],
 
     "@chevrotain/utils": ["@chevrotain/utils@11.0.3", "", {}, "sha512-YslZMgtJUyuMbZ+aKvfF3x1f5liK4mWNxghFRv7jqRR9C3R3fAOGTTKvxXDa2Y1s9zSbcpuO0cAxDYsc9SrXoQ=="],
+
+    "@duckflux/core": ["@duckflux/core@workspace:packages/core"],
+
+    "@duckflux/hub-nats": ["@duckflux/hub-nats@workspace:packages/hub-nats"],
+
+    "@duckflux/hub-redis": ["@duckflux/hub-redis@workspace:packages/hub-redis"],
+
+    "@duckflux/runner": ["@duckflux/runner@workspace:packages/runner"],
 
     "@grpc/grpc-js": ["@grpc/grpc-js@1.14.3", "", { "dependencies": { "@grpc/proto-loader": "^0.8.0", "@js-sdsl/ordered-map": "^4.4.2" } }, "sha512-Iq8QQQ/7X3Sac15oB6p0FmUg/klxQvXLeileoqrTRGJYLV+/9tubbr9ipz0GKHjmXVsgFPo/+W+2cA8eNcR+XA=="],
 
