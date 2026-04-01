@@ -2,8 +2,9 @@
 import { readFileSync } from "node:fs";
 import { parseArgs } from "node:util";
 import { dirname, resolve } from "node:path";
-import runCommand from "./run";
 import lintCommand from "./lint";
+import runCommand from "./run";
+import serverCommand from "./server";
 import validateCommand from "./validate";
 
 function getVersion(): string {
@@ -32,6 +33,8 @@ if (import.meta.main) {
       "redis-db": { type: "string", default: "0" },
       "trace-dir": { type: "string" },
       "trace-format": { type: "string", default: "json" },
+      "workflow-dir": { type: "string" },
+      "port": { type: "string", default: "3000" },
     },
     allowPositionals: true,
   });
@@ -52,9 +55,12 @@ if (import.meta.main) {
     const file = positionals[1];
     const exitCode = await validateCommand(file, values);
     if (typeof exitCode === "number" && exitCode !== 0) process.exit(exitCode);
+  } else if (cmd === "server") {
+    const exitCode = await serverCommand(values);
+    if (typeof exitCode === "number" && exitCode !== 0) process.exit(exitCode);
   } else {
     console.error("Unknown command:", cmd);
-    console.error("Available commands: run, lint, validate, version");
+    console.error("Available commands: run, lint, validate, version, server");
     process.exit(1);
   }
 }

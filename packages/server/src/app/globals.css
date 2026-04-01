@@ -1,0 +1,30 @@
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=Outfit:wght@300;400;500;600;700&display=swap');
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Disable Ant Design Collapse animation to prevent layout thrashing */
+.ant-collapse-content {
+  transition: none !important;
+  animation: none !important;
+}
+.ant-motion-collapse-legacy,
+.ant-motion-collapse {
+  transition: none !important;
+  animation: none !important;
+}
+.ant-collapse-content-hidden {
+  display: none;
+}

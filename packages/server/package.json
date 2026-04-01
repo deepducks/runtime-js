@@ -1,0 +1,44 @@
+{
+  "name": "@duckflux/server",
+  "version": "0.6.8",
+  "type": "module",
+  "bin": {
+    "duckflux-server": "dist/cli.js"
+  },
+  "exports": {
+    ".": "./dist/cli.js"
+  },
+  "files": [
+    "dist",
+    ".next",
+    "public",
+    "src"
+  ],
+  "scripts": {
+    "dev": "bun run src/cli.ts --dev",
+    "build": "bun run build:next && bun run build:cli && tsc --project tsconfig.build.json",
+    "build:next": "next build",
+    "build:cli": "bun build src/cli.ts --outdir dist --target node --format esm --banner '#!/usr/bin/env node'",
+    "postbuild": "chmod +x dist/cli.js",
+    "prepublishOnly": "bun run build",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "@duckflux/core": "workspace:*",
+    "@ant-design/icons": "^5.0.0",
+    "@ant-design/nextjs-registry": "^1.0.0",
+    "antd": "^5.0.0",
+    "chokidar": "^4.0.0",
+    "next": "^15.0.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "swr": "^2.0.0",
+    "yaml": "^2.2.1"
+  },
+  "devDependencies": {
+    "@types/node": "^25.0.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "typescript": "^5.2.2"
+  }
+}
