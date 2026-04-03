@@ -155,7 +155,7 @@ export class WorkflowState {
     // Event payload
     ctx["event"] = this.eventPayload ?? {};
 
-    // Now — epoch seconds to match timestamp() and Go runner behavior (Spec §12.9)
+    // Now — epoch seconds to match timestamp() (Spec §12.9)
     ctx["now"] = Math.floor(Date.now() / 1000);
 
     return ctx;

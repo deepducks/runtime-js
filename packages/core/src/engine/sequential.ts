@@ -323,7 +323,7 @@ export async function executeStep(
         throw new Error(`fallback cycle detected on participant '${fallbackName}'`);
       }
 
-      // Keep original step as failure (Go runner behavior)
+      // Keep original step as failure
       if (stepName) {
         state.setResult(stepName, {
           status: "failure",

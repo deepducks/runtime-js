@@ -21,7 +21,7 @@ flow:
   const result = await executeWorkflow(workflow, {});
 
   expect(result.success).toBe(false);
-  // v0.3: original step preserved as failure (Go runner behavior)
+  // v0.3: original step preserved as failure
   expect(result.steps.main?.status).toBe("failure");
   // Fixer ran successfully
   expect(result.steps.fixer?.status).toBe("success");

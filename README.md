@@ -2,7 +2,7 @@
 
 TypeScript runtime for [duckflux](https://docs.duckflux.openvibes.tech/javascript-runtime/) workflows. Dual-purpose: **CLI tool** (`@duckflux/runner`) and **importable library** (`@duckflux/core`).
 
-Spec version: **v0.6**
+Spec version: **v0.7**
 
 ## Packages
 
@@ -103,11 +103,11 @@ import { executeWorkflow } from "@duckflux/core/engine";
 import { MemoryHub } from "@duckflux/core/eventhub";
 ```
 
-## Spec v0.6 Features
+## Spec v0.7 Features
 
 - **Participant types** — `exec`, `http`, `emit`, `workflow` (+ `mcp` stub)
-- **Exec input semantics** (v0.6) — map input becomes env vars, string input becomes stdin
-- **Input merge on flow override** (v0.5) — chain < participant base input < flow override input
+- **Exec input semantics** — map input becomes env vars, string input becomes stdin
+- **Input merge on flow override** — chain < participant base input < flow override input
 - **`set` construct** — write values to `execution.context` via CEL expressions
 - **Inline participants** — define steps directly in the flow without a `participants` block
 - **Implicit I/O chain** — step output automatically flows as input to the next step

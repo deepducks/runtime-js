@@ -3,7 +3,7 @@ import { startContainer, stopContainer, type DockerContainer } from "./docker-he
 import { RedisHub } from "@duckflux/hub-redis";
 
 // ─────────────────────────────────────────────────────────
-// Redis Streams integration tests — aligned with Go runner redis_test.go
+// Redis Streams integration tests
 // Requires Docker. Skips if Docker is not available.
 // ─────────────────────────────────────────────────────────
 

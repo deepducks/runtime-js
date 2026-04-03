@@ -7,11 +7,11 @@ export interface RedisHubConfig {
 }
 
 /**
- * Redis Streams event hub — mirrors Go runner's RedisHub behavior.
+ * Redis Streams event hub
  *
  * Uses XADD/XREADGROUP with consumer groups. Each RedisHub instance owns one
  * connection and one consumer group. For fan-out, create multiple hubs with
- * different consumerGroup names (matching Go runner pattern).
+ * different consumerGroup names.
  *
  * Consumer groups read from "0" (beginning of stream) so late subscribers
  * receive messages published before they subscribed (persistent replay).
@@ -30,7 +30,7 @@ export class RedisHub implements EventHub {
     const hub = new RedisHub(config);
     const Redis = (await import("ioredis")).default;
 
-    // Parse "host:port" format (Go runner convention)
+    // Parse "host:port" format
     const addr = config.addr ?? "localhost:6379";
     const [host, portStr] = addr.split(":");
     const port = parseInt(portStr ?? "6379", 10);

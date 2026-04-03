@@ -2,7 +2,7 @@ import { test, expect } from "bun:test";
 import { MemoryHub } from "../../src/eventhub/memory";
 
 // ─────────────────────────────────────────────────────────
-// MemoryHub tests — aligned with Go runner hub_test.go
+// MemoryHub tests
 // ─────────────────────────────────────────────────────────
 
 test("MemoryHub: publish/subscribe round-trip", async () => {

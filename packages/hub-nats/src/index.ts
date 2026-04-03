@@ -6,7 +6,7 @@ export interface NatsHubConfig {
 }
 
 /**
- * NATS JetStream event hub — mirrors Go runner's NATSHub behavior.
+ * NATS JetStream event hub
  *
  * Each NatsHub instance owns one NATS connection. Subscribing creates an
  * ephemeral ordered consumer, so two NatsHub instances subscribing to the

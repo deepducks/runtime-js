@@ -3,7 +3,7 @@ import { startContainer, stopContainer, type DockerContainer } from "./docker-he
 import { NatsHub } from "@duckflux/hub-nats";
 
 // ─────────────────────────────────────────────────────────
-// NATS JetStream integration tests — aligned with Go runner nats_test.go
+// NATS JetStream integration tests
 // Requires Docker. Skips if Docker is not available.
 // ─────────────────────────────────────────────────────────
 
