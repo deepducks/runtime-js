@@ -1,19 +1,13 @@
 #!/usr/bin/env bun
-import { readFileSync } from "node:fs";
 import { parseArgs } from "node:util";
-import { dirname, resolve } from "node:path";
 import lintCommand from "./lint";
 import runCommand from "./run";
 import serverCommand from "./server";
 import validateCommand from "./validate";
+import pkg from "../package.json";
 
 function getVersion(): string {
-  try {
-    const pkg = JSON.parse(readFileSync(resolve(dirname(new URL(import.meta.url).pathname), "../package.json"), "utf-8"));
-    return pkg.version ?? "0.0.0";
-  } catch {
-    return "0.0.0";
-  }
+  return pkg.version ?? "0.0.0";
 }
 
 if (import.meta.main) {
