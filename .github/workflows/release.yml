@@ -353,12 +353,14 @@ jobs:
           cd packages/runner
 
           # amd64
-          VERSION="${VERSION}" NFPM_ARCH=amd64 BIN_ARCH=x64 \
-            nfpm package --packager deb --target "duckflux_${VERSION}_amd64.deb"
+          export VERSION NFPM_ARCH=amd64 BIN_ARCH=x64
+          envsubst < nfpm.yaml > nfpm-amd64.yaml
+          nfpm package --config nfpm-amd64.yaml --packager deb --target "duckflux_${VERSION}_amd64.deb"
 
           # arm64
-          VERSION="${VERSION}" NFPM_ARCH=arm64 BIN_ARCH=arm64 \
-            nfpm package --packager deb --target "duckflux_${VERSION}_arm64.deb"
+          export NFPM_ARCH=arm64 BIN_ARCH=arm64
+          envsubst < nfpm.yaml > nfpm-arm64.yaml
+          nfpm package --config nfpm-arm64.yaml --packager deb --target "duckflux_${VERSION}_arm64.deb"
 
       - name: Clone apt-repo
         run: |
