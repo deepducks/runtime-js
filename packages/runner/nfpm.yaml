@@ -4,7 +4,7 @@ platform: linux
 version: "${VERSION}"
 maintainer: "duckflux <hello@duckflux.dev>"
 description: "Declarative YAML-based workflow runner"
-homepage: "https://github.com/duckflux/runtime-js"
+homepage: "https://github.com/deepducks/runtime-js"
 license: "MIT"
 contents:
   - src: "bin/quack-linux-${BIN_ARCH}"

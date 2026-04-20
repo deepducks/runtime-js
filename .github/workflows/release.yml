@@ -253,7 +253,7 @@ jobs:
             ### via APT (Debian/Ubuntu)
 
             ```sh
-            curl -fsSL https://duckflux.github.io/apt-repo/install.sh | bash
+            curl -fsSL https://deepducks.github.io/apt-repo/install.sh | bash
             ```
           files: packages/runner/bin/*
           fail_on_unmatched_files: true
@@ -352,7 +352,7 @@ jobs:
         run: |
           VERSION="${{ needs.release-binaries.outputs.version }}"
           gh release download "v${VERSION}" \
-            --repo duckflux/runtime-js \
+            --repo deepducks/runtime-js \
             --pattern "${{ matrix.binary }}" \
             --dir .
           chmod +x ${{ matrix.binary }}
@@ -444,7 +444,7 @@ jobs:
 
       - name: Clone apt-repo
         run: |
-          git clone "https://x-access-token:${{ secrets.GH_PAT }}@github.com/duckflux/apt-repo.git" apt-repo
+          git clone "https://x-access-token:${{ secrets.GH_PAT }}@github.com/deepducks/apt-repo.git" apt-repo
 
       - name: Update APT repository
         run: |
@@ -508,7 +508,7 @@ jobs:
         run: |
           VERSION="${{ needs.release-binaries.outputs.version }}"
           gh release download "v${VERSION}" \
-            --repo duckflux/runtime-js \
+            --repo deepducks/runtime-js \
             --pattern "quack-darwin-*" \
             --pattern "quack-linux-*" \
             --dir binaries
@@ -521,7 +521,7 @@ jobs:
 
       - name: Clone homebrew-tap
         run: |
-          git clone "https://x-access-token:${{ secrets.GH_PAT }}@github.com/duckflux/homebrew-tap.git" homebrew-tap
+          git clone "https://x-access-token:${{ secrets.GH_PAT }}@github.com/deepducks/homebrew-tap.git" homebrew-tap
 
       - name: Generate formula
         run: |
@@ -529,26 +529,26 @@ jobs:
           cat > homebrew-tap/Formula/quack.rb << FORMULA
           class Quack < Formula
             desc "Declarative YAML-based workflow runner"
-            homepage "https://github.com/duckflux/runtime-js"
+            homepage "https://github.com/deepducks/runtime-js"
             version "${VERSION}"
             license "MIT"
 
             on_macos do
               if Hardware::CPU.arm?
-                url "https://github.com/duckflux/runtime-js/releases/download/v${VERSION}/quack-darwin-arm64"
+                url "https://github.com/deepducks/runtime-js/releases/download/v${VERSION}/quack-darwin-arm64"
                 sha256 "${SHA_DARWIN_ARM64}"
               else
-                url "https://github.com/duckflux/runtime-js/releases/download/v${VERSION}/quack-darwin-x64"
+                url "https://github.com/deepducks/runtime-js/releases/download/v${VERSION}/quack-darwin-x64"
                 sha256 "${SHA_DARWIN_X64}"
               end
             end
 
             on_linux do
               if Hardware::CPU.arm?
-                url "https://github.com/duckflux/runtime-js/releases/download/v${VERSION}/quack-linux-arm64"
+                url "https://github.com/deepducks/runtime-js/releases/download/v${VERSION}/quack-linux-arm64"
                 sha256 "${SHA_LINUX_ARM64}"
               else
-                url "https://github.com/duckflux/runtime-js/releases/download/v${VERSION}/quack-linux-x64"
+                url "https://github.com/deepducks/runtime-js/releases/download/v${VERSION}/quack-linux-x64"
                 sha256 "${SHA_LINUX_X64}"
               end
             end
