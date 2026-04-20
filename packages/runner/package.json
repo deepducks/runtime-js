@@ -1,6 +1,6 @@
 {
   "name": "@duckflux/runner",
-  "version": "0.7.4",
+  "version": "0.7.5",
   "type": "module",
   "bin": {
     "quack": "dist/main.js"
