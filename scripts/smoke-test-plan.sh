@@ -7,46 +7,78 @@
 # -------
 # Exercises the parts of the workflow trio that scripts/smoke-test.sh skips:
 #
-#   1. /agents plan end-to-end (questions-free draft → plan written → task
+#   1. /engineer end-to-end (questions-free draft → plan written → task
 #      issues created → labels/type/sub-issues applied).
 #   2. GitHub native issue types (Feature on the draft, Task on each child).
 #   3. Sub-issue relationships (children linked under the feature).
-#   4. /agents revert (closes tasks, strips labels, deletes comments,
+#   4. /revert (closes tasks, strips labels, deletes comments,
 #      restores the body from userContentEdits history).
-#   5. Per-comment reactions 👀 + 👍 (both /agents plan and /agents revert).
+#   5. Per-comment reactions 👀 + 👍 (both /engineer and /revert).
+#   6. The #164 stale-`Tactics:done` regression: rewriting the body to a fresh,
+#      marker-free design spec while `Tactics:done` lingers must not lose the
+#      rewritten design zone on the next /engineer run.
+#   7. The tactical-zone-preservation fix for /architect re-runs: an
+#      existing tactical zone (markers + YAML wave plan) must survive
+#      verbatim below a freshly-written design zone, and a markerless body
+#      must still get no tactical markers on the fallback path.
+#
+# With --single, runs a separate variant instead: seeds a draft narrow
+# enough to yield exactly one task, and asserts the engineer-agent's
+# single-task fast path (no child issue, no YAML `waves:` block, no
+# sub-issue links, `Tactics:done` label, task content merged into the
+# feature body) plus its revert. See OPTIONS below.
 #
 # COST
 # ----
-# Runs one plan-agent call at `sonnet low` reasoning to keep it cheap.
-# Expected wall time: 3–6 min. No task worker is triggered — this test
-# covers the planning half of the pipeline, not the shipping half.
+# Runs four engineer/architect-agent calls at `sonnet low` effort to keep it
+# cheap. Expected wall time: 8–13 min. No task worker is triggered — this
+# test covers the planning half of the pipeline, not the shipping half.
+# (--single runs a single, cheaper engineer-agent call instead.)
 #
 # USAGE
 # -----
 #   ./scripts/smoke-test-plan.sh [OPTIONS]
 #
 # OPTIONS
-#   --keep          Do not run /agents revert at the end (leaves the
+#   --keep          Do not run /revert at the end (leaves the
 #                   feature + task issues in place for manual inspection).
-#   --no-wait       Create the seed issue and kickstart /agents plan,
+#   --no-wait       Create the seed issue and kickstart /engineer,
 #                   don't wait for completion.
+#   --single        Run the single-task fast-path variant instead of the
+#                   default multi-task pipeline: seeds a draft narrow
+#                   enough to yield exactly one task, then asserts the
+#                   single-task contract (no child issue, no YAML `waves:`
+#                   block, `Tactics:done` label) and its revert. Does
+#                   not run the multi-task assertions below — run the
+#                   script without this flag to cover that regression.
 #   --repo OWNER/REPO  Target repo (default: current repo from `gh`).
 #   -h, --help      Show this help.
 #
 # ASSERTIONS (SOFT vs HARD)
 # -------------------------
 # Hard assertions (fail the test if violated):
-#   - /agents plan run completes with success
-#   - Feature issue receives `feature` + `draft` labels
+#   - /engineer run completes with success
+#   - Feature issue receives `Tactics:done` label
 #   - Issue body changes (plan written into it)
 #   - At least 1 task issue created with `priority:P*` label
-#   - /agents revert closes all task issues and strips labels
+#   - /revert closes all task issues and strips labels
+#   - #164 regression: after rewriting the body to a fresh, marker-free
+#     design spec while `Tactics:done` lingers and re-running /engineer, the
+#     rewritten design zone must survive verbatim with a fresh tactical
+#     zone appended below it (sentinel present, markers present, sentinel
+#     above the begin marker)
+#   - /architect re-run regression: an existing tactical zone (markers +
+#     YAML wave plan) must survive verbatim below a freshly-written design
+#     zone (markers present, tactical sentinel below the begin marker, fresh
+#     design-spec heading above it)
+#   - /architect on a markerless body writes the design spec as the full
+#     body and introduces no tactical markers
 #
 # Soft assertions (logged as warning if violated, test still passes):
 #   - Issue type = Feature on the draft, Task on children
 #     (requires org-level issue-type configuration)
 #   - Sub-issue links exist (requires sub-issues API enabled)
-#   - 👀 reaction on /agents plan comment (may miss if react.sh races)
+#   - 👀 reaction on /engineer comment (may miss if reaction races)
 #   - Body reverts to original (requires userContentEdits coverage)
 # =============================================================================
 
@@ -54,6 +86,7 @@ set -euo pipefail
 
 KEEP=false
 WAIT=true
+SINGLE=false
 REPO=""
 TIMESTAMP=$(date +%Y%m%d-%H%M%S)
 
@@ -61,6 +94,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --keep) KEEP=true; shift ;;
     --no-wait) WAIT=false; shift ;;
+    --single) SINGLE=true; shift ;;
     --repo) REPO="$2"; shift 2 ;;
     -h|--help)
       sed -n '2,60p' "$0"
@@ -88,26 +122,313 @@ pass() { echo "  ✅ $1"; }
 fail() { echo "  ❌ $1"; FAIL=$((FAIL + 1)); }
 warn() { echo "  ⚠️  $1"; WARN=$((WARN + 1)); }
 
+# Poll a comment's reactions for the terminal signal every workflow posts:
+#   +1       → success
+#   confused → failure
+# Scoped to the specific comment, so it's immune to GitHub's occasional
+# double-fire on issue_comment (the skipped duplicate never touches
+# reactions) and safe with parallel workflows on other issues (they
+# post on their own comments). Returns 0=success, 1=failure, 2=timeout.
+# NOTE: not usable for /revert or /close — those
+# workflows delete the triggering comment before completing. Use
+# wait_for_feature_unplanned / wait_for_feature_closed for those.
+wait_for_reaction() {
+  local comment_id="$1"
+  local timeout_s="$2"
+  local label="$3"
+  local interval=10
+  local waited=0
+  local reactions=""
+  while [[ $waited -lt $timeout_s ]]; do
+    reactions=$(gh api "repos/$REPO/issues/comments/$comment_id/reactions" \
+      --jq '[.[].content] | join(",")' 2>/dev/null || echo "")
+    case ",$reactions," in
+      *,+1,*)       return 0 ;;
+      *,confused,*) return 1 ;;
+    esac
+    sleep $interval
+    waited=$((waited + interval))
+    if [[ $((waited % 60)) -eq 0 ]]; then
+      echo "  ... $label ${waited}/${timeout_s}s (reactions: ${reactions:-none})"
+    fi
+  done
+  return 2
+}
+
+# Poll a feature issue until both terminal invariants of /revert
+# are satisfied: `Tactics:done`+`draft` labels stripped AND all comments
+# deleted. We check both because the workflow removes labels first and
+# deletes comments last, so waiting on labels alone returns too early
+# and races with the comment-count assertion downstream. Used instead
+# of reaction-polling because revert deletes its own trigger comment.
+# Issue-scoped — parallel reverts on other features don't cross-talk.
+# Returns 0=both invariants satisfied, 2=timeout.
+wait_for_feature_unplanned() {
+  local issue="$1"
+  local timeout_s="$2"
+  local interval=5
+  local waited=0
+  local labels=""
+  local comments="?"
+  while [[ $waited -lt $timeout_s ]]; do
+    labels=$(gh api "repos/$REPO/issues/$issue" \
+      --jq '[.labels[].name] | join(",")' 2>/dev/null || echo "?")
+    comments=$(gh api "repos/$REPO/issues/$issue/comments" \
+      --jq '. | length' 2>/dev/null || echo "?")
+    local labels_clean=1
+    case ",$labels," in
+      *,Tactics:done,*|*,draft,*) labels_clean=0 ;;
+    esac
+    if [[ "$labels_clean" == "1" && "$comments" == "0" ]]; then
+      return 0
+    fi
+    sleep $interval
+    waited=$((waited + interval))
+    if [[ $((waited % 30)) -eq 0 ]]; then
+      echo "  ... revert ${waited}/${timeout_s}s (labels: ${labels:-none}, comments: $comments)"
+    fi
+  done
+  return 2
+}
+
 # --- Ensure labels exist (plan agent creates priority:P* lazily but we
 #     want them ready so we can assert quickly) ---
-echo "[1/7] Ensuring labels exist..."
-gh label create "feature"     --color "6F42C1" --description "Orchestration feature issue" $REPO_ARG 2>/dev/null || true
-gh label create "draft"       --color "CCCCCC" --description "Plan drafted but not yet kickstarted" $REPO_ARG 2>/dev/null || true
+echo "[1/9] Ensuring labels exist..."
+gh label create "Tactics:done" --color "D93F0B" --description "Tactical plan complete" $REPO_ARG 2>/dev/null || true
+gh label create "Draft"       --color "CCCCCC" --description "Draft issue, not yet designed" $REPO_ARG 2>/dev/null || true
 gh label create "smoke-test"  --color "FFA500" --description "Smoke test" $REPO_ARG 2>/dev/null || true
 gh label create "priority:P0" --color "B60205" --description "Critical" $REPO_ARG 2>/dev/null || true
 pass "Labels ensured"
 echo ""
 
+# =============================================================================
+# Single-task variant (--single): exercises the engineer-agent's single-task
+# fast path instead of the default multi-task pipeline below. Seeds a draft
+# narrow enough (single file, one documented function) to yield exactly one
+# task and specific enough to skip Questions Mode, then asserts the
+# single-task contract (no child issue, no YAML `waves:` block, no sub-issue
+# links, `Tactics:done` label, task content merged into the feature body)
+# and its revert. Exits before reaching the multi-task flow below, so running
+# without --single exercises that flow unchanged (regression guard).
+# =============================================================================
+if [[ "$SINGLE" == true ]]; then
+  echo "[2/6] Creating seed feature issue (single-task draft)..."
+  SEED_BODY=$(cat <<EOF
+# Single-task smoke test — ${TIMESTAMP}
+
+Add one tiny utility module at \`scripts/smoke-single-${TIMESTAMP}/only.sh\`.
+This is a synthetic test — no real implementation is needed, the goal is
+just to exercise the /engineer single-task fast path end-to-end.
+
+## File to create
+
+### \`scripts/smoke-single-${TIMESTAMP}/only.sh\`
+
+A bash script with one documented function \`only_echo\` that echoes its
+single positional argument.
+
+\`\`\`bash
+#!/usr/bin/env bash
+# Usage: ./only.sh <value>
+# Echoes: value
+set -euo pipefail
+# only_echo echoes its single argument verbatim.
+only_echo() {
+  echo "\$1"
+}
+only_echo "\${1:-}"
+\`\`\`
+
+## Acceptance Criteria
+
+- \`scripts/smoke-single-${TIMESTAMP}/only.sh\` exists and is executable
+- \`./only.sh hi\` echoes \`hi\`
+
+## Notes
+
+This issue is created by \`smoke-test-plan.sh --single\` and will be
+reverted via \`/revert\` once the single-task assertions pass. Do
+not expect the code to actually ship.
+EOF
+)
+
+  SEED_URL=$(gh issue create $REPO_ARG \
+    --title "Smoke [single-task pipeline] ${TIMESTAMP}" \
+    --label "smoke-test" \
+    --body "$SEED_BODY")
+  FEATURE=$(echo "$SEED_URL" | grep -oE '[0-9]+$')
+  echo "  Seed issue: #$FEATURE → $SEED_URL"
+
+  SEED_BODY_NOW=$(gh issue view $FEATURE $REPO_ARG --json body --jq '.body')
+  echo "  Seed body captured (${#SEED_BODY_NOW} chars)"
+  echo ""
+
+  # --- Trigger /engineer ---
+  echo "[3/6] Triggering /engineer sonnet low..."
+  PLAN_COMMENT_URL=$(gh issue comment $FEATURE $REPO_ARG --body "/engineer sonnet low")
+  PLAN_COMMENT_ID=$(echo "$PLAN_COMMENT_URL" | grep -oE 'issuecomment-[0-9]+' | grep -oE '[0-9]+$' || echo "")
+  echo "  Plan comment posted (id: ${PLAN_COMMENT_ID:-unknown})"
+
+  if [[ "$WAIT" == false ]]; then
+    echo ""
+    echo "Skipping wait (--no-wait). Seed: $SEED_URL"
+    exit 0
+  fi
+  echo ""
+
+  echo "[4/6] Waiting for engineer-agent terminal reaction..."
+  if [[ -z "${PLAN_COMMENT_ID:-}" ]]; then
+    fail "cannot track engineer-agent — missing PLAN_COMMENT_ID"
+    exit 1
+  fi
+  PLAN_RC=0
+  wait_for_reaction "$PLAN_COMMENT_ID" 600 "engineer-agent (single)" || PLAN_RC=$?
+  case $PLAN_RC in
+    0) pass "engineer-agent run completed successfully" ;;
+    1) fail "engineer-agent run failed (😕 reaction on /engineer comment)"; exit 1 ;;
+    2) fail "engineer-agent run did not complete within 10 min"; exit 1 ;;
+  esac
+  echo ""
+
+  # --- Assert the single-task contract ---
+  echo "[5/6] Asserting single-task contract..."
+  CURRENT_BODY=$(gh issue view $FEATURE $REPO_ARG --json body --jq '.body')
+
+  if [[ "$CURRENT_BODY" != "$SEED_BODY_NOW" ]]; then
+    pass "Feature body updated by engineer-agent (${#CURRENT_BODY} chars vs ${#SEED_BODY_NOW} initial)"
+  else
+    fail "Feature body unchanged — engineer-agent did not write the plan"
+  fi
+
+  LABELS=$(gh issue view $FEATURE $REPO_ARG --json labels --jq '[.labels[].name] | join(",")')
+  if echo "$LABELS" | grep -q "Tactics:done"; then pass "Label 'Tactics:done' applied to #$FEATURE"; else fail "Label 'Tactics:done' missing"; fi
+  if echo "$LABELS" | grep -q "Tactics:done"; then pass "Label 'Tactics:done' applied to #$FEATURE"; else fail "Label 'Tactics:done' missing"; fi
+  if echo "$LABELS" | grep -q "Tactics:done"; then pass "Label 'Tactics:done' applied to #$FEATURE"; else fail "Label 'Tactics:done' missing"; fi
+
+  if echo "$CURRENT_BODY" | grep -qE '^```yaml[[:space:]]*$'; then
+    fail "Feature body contains a \`\`\`yaml waves: block — single-task fast path must skip wave YAML"
+  else
+    pass "No \`\`\`yaml waves: block in feature body (single-task fast path)"
+  fi
+
+  for h in "## Summary" "## Tasks" "## Acceptance Criteria"; do
+    if echo "$CURRENT_BODY" | grep -qF "$h"; then
+      pass "Feature body contains '$h'"
+    else
+      fail "Feature body missing '$h'"
+    fi
+  done
+
+  BEGIN_LINE=$(echo "$CURRENT_BODY" | grep -nE '^[[:space:]]*<!-- autoducks:tactical:begin -->[[:space:]]*$' | head -1 | cut -d: -f1 || echo "")
+  END_LINE=$(echo "$CURRENT_BODY" | grep -nE '^[[:space:]]*<!-- autoducks:tactical:end -->[[:space:]]*$' | head -1 | cut -d: -f1 || echo "")
+  if [[ -n "$BEGIN_LINE" && -n "$END_LINE" ]]; then
+    pass "Tactical zone markers present"
+    SUMMARY_LINE=$(echo "$CURRENT_BODY" | grep -nE '^## Summary[[:space:]]*$' | head -1 | cut -d: -f1 || echo "")
+    ACCEPT_LINE=$(echo "$CURRENT_BODY" | grep -nE '^## Acceptance Criteria[[:space:]]*$' | head -1 | cut -d: -f1 || echo "")
+    if [[ -n "$SUMMARY_LINE" && -n "$ACCEPT_LINE" && "$SUMMARY_LINE" -gt "$BEGIN_LINE" && "$SUMMARY_LINE" -lt "$END_LINE" && "$ACCEPT_LINE" -gt "$BEGIN_LINE" && "$ACCEPT_LINE" -lt "$END_LINE" ]]; then
+      pass "Task content ('## Summary' … '## Acceptance Criteria') is between the tactical sentinels"
+    else
+      fail "Task content is not between the tactical sentinels"
+    fi
+  else
+    fail "Tactical zone markers missing"
+  fi
+
+  # No child Task issue / no sub-issues linked
+  PROBE_STATUS=$(gh api "repos/$REPO/issues/$FEATURE/sub_issues" \
+                 --include 2>/dev/null | awk 'NR==1 { print $2 }' || echo "")
+  if [[ "$PROBE_STATUS" =~ ^2 ]]; then
+    SUB_ISSUE_COUNT=$(gh api "repos/$REPO/issues/$FEATURE/sub_issues" --jq '[.[].number] | length' 2>/dev/null || echo "0")
+    if [[ "$SUB_ISSUE_COUNT" -eq 0 ]]; then
+      pass "No sub-issues linked to #$FEATURE (single-task fast path)"
+    else
+      fail "$SUB_ISSUE_COUNT sub-issue(s) linked to #$FEATURE — expected none for single-task fast path"
+    fi
+  else
+    warn "Sub-issues API not available on this repository (HTTP ${PROBE_STATUS:-none}); skipping sub-issue assertion"
+  fi
+  echo ""
+
+  # --- Trigger /revert (unless --keep) ---
+  if [[ "$KEEP" == true ]]; then
+    echo "[6/6] Skipping /revert (--keep). Test complete."
+    echo ""
+    echo "=== Summary ==="
+    echo "  Fail:    $FAIL"
+    echo "  Warn:    $WARN"
+    [[ $FAIL -eq 0 ]] && echo "✅ Single-task assertions passed (kept state)." && exit 0 || { echo "❌ Single-task assertions failed."; exit 1; }
+  fi
+
+  echo "[6/6] Triggering /revert..."
+  REVERT_COMMENT_URL=$(gh issue comment $FEATURE $REPO_ARG --body "/revert")
+  REVERT_COMMENT_ID=$(echo "$REVERT_COMMENT_URL" | grep -oE 'issuecomment-[0-9]+' | grep -oE '[0-9]+$' || echo "")
+  echo "  Revert comment posted (id: ${REVERT_COMMENT_ID:-unknown})"
+
+  REVERT_RC=0
+  wait_for_feature_unplanned "$FEATURE" 120 || REVERT_RC=$?
+  case $REVERT_RC in
+    0) pass "revert completed (labels stripped + comments deleted on #$FEATURE)" ;;
+    2) fail "revert did not reach terminal state within 2 min" ;;
+  esac
+  echo ""
+
+  echo "Asserting revert state..."
+  FINAL_LABELS=$(gh issue view $FEATURE $REPO_ARG --json labels --jq '[.labels[].name] | join(",")')
+  if ! echo "$FINAL_LABELS" | grep -q "Tactics:done"; then
+    pass "Label 'Tactics:done' removed from #$FEATURE"
+  else
+    fail "Label 'Tactics:done' still present (got: $FINAL_LABELS)"
+  fi
+  if ! echo "$FINAL_LABELS" | grep -q "Tactics:done"; then
+    pass "Label 'Tactics:done' removed from #$FEATURE"
+  else
+    fail "Label 'Tactics:done' still present (got: $FINAL_LABELS)"
+  fi
+
+  COMMENT_COUNT=$(gh api "repos/$REPO/issues/$FEATURE/comments" --jq '. | length' 2>/dev/null || echo "999")
+  if [[ "$COMMENT_COUNT" -eq 0 ]]; then
+    pass "All comments deleted from #$FEATURE"
+  else
+    fail "$COMMENT_COUNT comment(s) still present on #$FEATURE (expected 0)"
+  fi
+
+  POST_REVERT_BODY=$(gh issue view $FEATURE $REPO_ARG --json body --jq '.body')
+  if [[ "$POST_REVERT_BODY" == "$SEED_BODY_NOW" ]]; then
+    pass "Feature body matches original seed after revert"
+  else
+    warn "Feature body differs from seed after revert (expected if userContentEdits didn't track creation)"
+  fi
+
+  gh issue close $FEATURE $REPO_ARG --comment "Smoke test complete — closing." 2>/dev/null || true
+  echo ""
+
+  echo "=== Summary ==="
+  echo "  Fail:    $FAIL"
+  echo "  Warn:    $WARN"
+
+  if [[ $FAIL -eq 0 ]]; then
+    if [[ $WARN -eq 0 ]]; then
+      echo "✅ Single-task smoke test passed with no warnings."
+    else
+      echo "✅ Single-task smoke test passed with $WARN soft warning(s)."
+    fi
+    exit 0
+  else
+    echo "❌ Single-task smoke test FAILED — $FAIL hard assertion(s) violated."
+    exit 1
+  fi
+fi
+
 # --- Create the seed issue with a narrow, decomposable draft ---
 # The draft is intentionally specific (explicit file paths, exact signatures)
-# so the plan-agent goes straight to Plan Mode without asking questions.
-echo "[2/7] Creating seed feature issue..."
+# so the engineer-agent goes straight to Plan Mode without asking questions.
+echo "[2/9] Creating seed feature issue..."
 SEED_BODY=$(cat <<EOF
 # Plan smoke test — ${TIMESTAMP}
 
 Add two tiny utility modules under \`scripts/smoke-plan-${TIMESTAMP}/\`, each
 with a documented signature. This is a synthetic test — no real
-implementation is needed, the goal is just to exercise the /agents plan
+implementation is needed, the goal is just to exercise the /engineer
 pipeline end-to-end.
 
 ## Files to create
@@ -146,7 +467,7 @@ echo \$((\${1:-0} - \${2:-0}))
 ## Notes
 
 This issue is created by \`smoke-test-plan.sh\` and will be reverted via
-\`/agents revert\` once the plan-pipeline assertions pass. Do not expect
+\`/revert\` once the plan-pipeline assertions pass. Do not expect
 the code to actually ship.
 EOF
 )
@@ -165,9 +486,9 @@ SEED_BODY_NOW=$(gh issue view $FEATURE $REPO_ARG --json body --jq '.body')
 echo "  Seed body captured (${#SEED_BODY_NOW} chars)"
 echo ""
 
-# --- Trigger /agents plan ---
-echo "[3/7] Triggering /agents plan sonnet low..."
-PLAN_COMMENT_URL=$(gh issue comment $FEATURE $REPO_ARG --body "/agents plan sonnet low")
+# --- Trigger /engineer ---
+echo "[3/9] Triggering /engineer sonnet low..."
+PLAN_COMMENT_URL=$(gh issue comment $FEATURE $REPO_ARG --body "/engineer sonnet low")
 PLAN_COMMENT_ID=$(echo "$PLAN_COMMENT_URL" | grep -oE 'issuecomment-[0-9]+' | grep -oE '[0-9]+$' || echo "")
 echo "  Plan comment posted (id: ${PLAN_COMMENT_ID:-unknown})"
 
@@ -178,77 +499,50 @@ if [[ "$WAIT" == false ]]; then
 fi
 echo ""
 
-# --- Wait for plan-agent run to complete ---
-echo "[4/7] Waiting for plan-agent run..."
-# Find the run triggered by this comment. Event name + timing + event actor
-# uniquely identify it.
-PLAN_WAITED=0
-PLAN_RUN_ID=""
-# Every /agents comment fires ALL 6 workflows on this repo; most skip
-# because their if: guard doesn't match. Filter out conclusion=skipped
-# so we grab the one that's actually running /agents plan.
-CUTOFF=$(date -u -v-2M '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date -u -d '-2 min' '+%Y-%m-%dT%H:%M:%SZ')
-while [[ $PLAN_WAITED -lt 60 ]]; do
-  PLAN_RUN_ID=$(gh run list --workflow="Claude Plan Agent" --limit 5 \
-    --json databaseId,createdAt,conclusion \
-    --jq "[.[] | select(.createdAt > \"$CUTOFF\" and .conclusion != \"skipped\")] | .[0].databaseId // empty" 2>/dev/null || echo "")
-  [[ -n "$PLAN_RUN_ID" ]] && break
-  sleep 5
-  PLAN_WAITED=$((PLAN_WAITED + 5))
-done
-
-if [[ -z "$PLAN_RUN_ID" ]]; then
-  fail "plan-agent run did not appear within 60s"
+# --- Wait for engineer-agent terminal reaction ---
+# Each `/agents` comment triggers every workflow; five skip via `if:`
+# guards and one runs. GitHub occasionally emits more than one run for
+# the same comment event, and `conclusion != "skipped"` can't filter
+# them at pick-time because both are still `in_progress`. So we track
+# the *comment reactions* the workflow itself posts (👀 → 👍/😕)
+# instead of trying to pin a run ID. Reactions are tied to our specific
+# comment, so parallel workflows on other issues don't cross-talk.
+echo "[4/9] Waiting for engineer-agent terminal reaction..."
+if [[ -z "${PLAN_COMMENT_ID:-}" ]]; then
+  fail "cannot track engineer-agent — missing PLAN_COMMENT_ID"
   exit 1
 fi
-echo "  Plan run: $PLAN_RUN_ID"
-
-# Poll for completion (up to 10 min)
-PLAN_WAITED=0
-while [[ $PLAN_WAITED -lt 600 ]]; do
-  STATUS=$(gh run view $PLAN_RUN_ID --json status,conclusion --jq '.status + "|" + (.conclusion // "")' 2>/dev/null || echo "")
-  if [[ "$STATUS" == completed* ]]; then
-    CONCLUSION=$(echo "$STATUS" | cut -d'|' -f2)
-    if [[ "$CONCLUSION" == "success" ]]; then
-      pass "plan-agent run completed successfully (${PLAN_WAITED}s)"
-    else
-      fail "plan-agent run completed with conclusion=$CONCLUSION"
-      exit 1
-    fi
-    break
-  fi
-  sleep 15
-  PLAN_WAITED=$((PLAN_WAITED + 15))
-  echo "  ... $PLAN_WAITED/600s ($STATUS)"
-done
-
-if [[ $PLAN_WAITED -ge 600 ]]; then
-  fail "plan-agent run did not complete within 10 min"
-  exit 1
-fi
+# `|| RC=$?` neutralizes `set -e` so non-zero returns don't abort the
+# script before we can interpret them.
+PLAN_RC=0
+wait_for_reaction "$PLAN_COMMENT_ID" 600 "engineer-agent" || PLAN_RC=$?
+case $PLAN_RC in
+  0) pass "engineer-agent run completed successfully" ;;
+  1) fail "engineer-agent run failed (😕 reaction on /engineer comment)"; exit 1 ;;
+  2) fail "engineer-agent run did not complete within 10 min"; exit 1 ;;
+esac
 echo ""
 
 # --- Assert: reactions, body change, labels, tasks created ---
-echo "[5/7] Asserting plan pipeline state..."
+echo "[5/9] Asserting plan pipeline state..."
 
-# Reactions on /agents plan comment
+# Reactions on /engineer comment
 if [[ -n "$PLAN_COMMENT_ID" ]]; then
   REACTIONS=$(gh api "repos/$REPO/issues/comments/$PLAN_COMMENT_ID/reactions" --jq '[.[].content]' 2>/dev/null || echo "[]")
-  if echo "$REACTIONS" | grep -q "eyes"; then pass "👀 reaction on /agents plan comment"; else warn "👀 reaction missing on /agents plan comment"; fi
-  if echo "$REACTIONS" | grep -q "+1";   then pass "👍 reaction on /agents plan comment"; else warn "👍 reaction missing on /agents plan comment"; fi
+  if echo "$REACTIONS" | grep -q "eyes"; then pass "👀 reaction on /engineer comment"; else warn "👀 reaction missing on /engineer comment"; fi
+  if echo "$REACTIONS" | grep -q "+1";   then pass "👍 reaction on /engineer comment"; else warn "👍 reaction missing on /engineer comment"; fi
 fi
 
 # Labels
 LABELS=$(gh issue view $FEATURE $REPO_ARG --json labels --jq '[.labels[].name] | join(",")')
-if echo "$LABELS" | grep -q "feature"; then pass "Label 'feature' applied to #$FEATURE"; else fail "Label 'feature' missing"; fi
-if echo "$LABELS" | grep -q "draft";   then pass "Label 'draft' applied to #$FEATURE";   else fail "Label 'draft' missing"; fi
+if echo "$LABELS" | grep -q "Tactics:done"; then pass "Label 'Tactics:done' applied to #$FEATURE"; else fail "Label 'Tactics:done' missing"; fi
 
 # Body changed
 CURRENT_BODY=$(gh issue view $FEATURE $REPO_ARG --json body --jq '.body')
 if [[ "$CURRENT_BODY" != "$SEED_BODY_NOW" ]]; then
-  pass "Feature body updated by plan-agent (${#CURRENT_BODY} chars vs ${#SEED_BODY_NOW} initial)"
+  pass "Feature body updated by engineer-agent (${#CURRENT_BODY} chars vs ${#SEED_BODY_NOW} initial)"
 else
-  fail "Feature body unchanged — plan-agent did not write the plan"
+  fail "Feature body unchanged — engineer-agent did not write the plan"
 fi
 
 # Extract task numbers from YAML block. Use a grep-only approach so we
@@ -303,9 +597,11 @@ for t in "${TASK_NUMBERS[@]:-}"; do
   fi
 done
 
-# Sub-issue relationships — soft assertion
-SUB_ISSUES=$(gh api "repos/$REPO/issues/$FEATURE/sub_issues" --jq '[.[].number]' 2>/dev/null || echo "[]")
-if [[ "$SUB_ISSUES" != "[]" ]]; then
+PROBE_STATUS=$(gh api "repos/$REPO/issues/$FEATURE/sub_issues" \
+               --include 2>/dev/null | awk 'NR==1 { print $2 }' || echo "")
+if [[ "$PROBE_STATUS" =~ ^2 ]]; then
+  # API available — partial linkage is a hard failure
+  SUB_ISSUES=$(gh api "repos/$REPO/issues/$FEATURE/sub_issues" --jq '[.[].number]' 2>/dev/null || echo "[]")
   MATCHED=0
   for t in "${TASK_NUMBERS[@]:-}"; do
     [[ -z "$t" ]] && continue
@@ -316,16 +612,270 @@ if [[ "$SUB_ISSUES" != "[]" ]]; then
   if [[ $MATCHED -eq ${#TASK_NUMBERS[@]:-0} ]]; then
     pass "All ${#TASK_NUMBERS[@]} tasks linked as sub-issues of #$FEATURE"
   else
-    warn "Only $MATCHED/${#TASK_NUMBERS[@]} tasks linked as sub-issues (API partial)"
+    fail "Sub-issues API is available but only $MATCHED/${#TASK_NUMBERS[@]} tasks are linked to #$FEATURE"
   fi
 else
-  warn "No sub-issues found on #$FEATURE (sub-issues API may be unavailable)"
+  warn "Sub-issues API not available on this repository (HTTP ${PROBE_STATUS:-none}); skipping sub-issue assertion"
 fi
 echo ""
 
-# --- Trigger /agents revert (unless --keep) ---
+# --- Reproduce the #164 stale-`Tactics:done` data-loss regression ---
+# Rewrite the feature body to a brand-new, marker-free design spec while the
+# `Tactics:done` label lingers (the exact precondition #164 exploited), then re-run
+# /engineer. Pre-fix, the engineer-agent would use the stale `Tactics:done`
+# label to assume markers should exist, mishandle the markerless body, and
+# lose the rewritten design content. Post-fix, markers (not the label) are
+# the single source of truth: no markers means the whole body is the design
+# zone, which must survive verbatim with a fresh tactical zone appended below.
+echo "[6/9] Reproducing #164 regression (stale Tactics:done + rewritten markerless body)..."
+SENTINEL="REWRITTEN-DESIGN-${TIMESTAMP}"
+REWRITE_BODY=$(cat <<EOF
+# ${SENTINEL}
+
+This is a brand-new, marker-free design spec used to reproduce the stale-
+\`Tactics:done\`-label data-loss regression (#164). The feature body is rewritten
+while the \`Tactics:done\` label is still attached, and a second \`/engineer\`
+run must treat this rewritten body as the new design zone — preserving it
+verbatim — instead of losing it because a stale \`Tactics:done\` label implied
+markers should already exist.
+
+## Files to create
+
+### \`scripts/smoke-plan-${TIMESTAMP}-v2/noop.sh\`
+
+A bash script that does nothing but echo \`ok\`.
+
+\`\`\`bash
+#!/usr/bin/env bash
+set -euo pipefail
+echo ok
+\`\`\`
+
+## Acceptance Criteria
+
+- \`scripts/smoke-plan-${TIMESTAMP}-v2/noop.sh\` exists and echoes \`ok\`
+EOF
+)
+
+gh issue edit $FEATURE $REPO_ARG --body "$REWRITE_BODY" >/dev/null
+pass "Feature body overwritten with marker-free design spec (sentinel: $SENTINEL)"
+
+REWRITE_LABELS=$(gh issue view $FEATURE $REPO_ARG --json labels --jq '[.labels[].name] | join(",")')
+if echo "$REWRITE_LABELS" | grep -q "Tactics:done"; then
+  pass "'Tactics:done' label still present after rewrite (regression precondition)"
+else
+  fail "'Tactics:done' label missing after rewrite — cannot reproduce #164 precondition"
+fi
+
+REDEVISE_COMMENT_URL=$(gh issue comment $FEATURE $REPO_ARG --body "/engineer sonnet low")
+REDEVISE_COMMENT_ID=$(echo "$REDEVISE_COMMENT_URL" | grep -oE 'issuecomment-[0-9]+' | grep -oE '[0-9]+$' || echo "")
+echo "  Second devise comment posted (id: ${REDEVISE_COMMENT_ID:-unknown})"
+
+REDEVISE_RC=0
+if [[ -z "${REDEVISE_COMMENT_ID:-}" ]]; then
+  fail "cannot track second engineer-agent run — missing REDEVISE_COMMENT_ID"
+else
+  wait_for_reaction "$REDEVISE_COMMENT_ID" 600 "engineer-agent (redevise)" || REDEVISE_RC=$?
+  case $REDEVISE_RC in
+    0) pass "second engineer-agent run completed successfully" ;;
+    1) fail "second engineer-agent run failed (😕 reaction on second /engineer comment)" ;;
+    2) fail "second engineer-agent run did not complete within 10 min" ;;
+  esac
+fi
+
+if [[ "$REDEVISE_RC" -eq 0 ]]; then
+  REDEVISE_BODY=$(gh issue view $FEATURE $REPO_ARG --json body --jq '.body')
+
+  if echo "$REDEVISE_BODY" | grep -qF "$SENTINEL"; then
+    pass "Rewritten design-zone sentinel survived the second /engineer run"
+  else
+    fail "Rewritten design-zone sentinel LOST — #164 data-loss regression reproduced"
+  fi
+
+  if echo "$REDEVISE_BODY" | grep -qE '^[[:space:]]*<!-- autoducks:tactical:begin -->[[:space:]]*$' && \
+     echo "$REDEVISE_BODY" | grep -qE '^[[:space:]]*<!-- autoducks:tactical:end -->[[:space:]]*$'; then
+    pass "Tactical zone markers present after second /engineer run"
+  else
+    fail "Tactical zone markers missing after second /engineer run"
+  fi
+
+  SENTINEL_LINE=$(echo "$REDEVISE_BODY" | grep -nF "$SENTINEL" | head -1 | cut -d: -f1 || echo "")
+  BEGIN_LINE=$(echo "$REDEVISE_BODY" | grep -nE '^[[:space:]]*<!-- autoducks:tactical:begin -->[[:space:]]*$' | head -1 | cut -d: -f1 || echo "")
+  if [[ -n "$SENTINEL_LINE" && -n "$BEGIN_LINE" && "$SENTINEL_LINE" -lt "$BEGIN_LINE" ]]; then
+    pass "Sentinel appears above the tactical:begin marker (design zone preserved, tactical zone appended below)"
+  else
+    fail "Sentinel does not appear above the tactical:begin marker (design zone corrupted or markers misplaced)"
+  fi
+
+  # The rewrite started from a markerless body, so the second /engineer
+  # run had no prior task numbers to revise (empty tactical zone in) and
+  # created a brand-new task set instead of reconciling the first round's.
+  # Close the now-orphaned first-round tasks ourselves and swap TASK_NUMBERS
+  # to the second round so the revert-phase close-assertions below check
+  # what /revert will actually act on (the YAML block in the current
+  # body), not issues it was never going to touch.
+  for t in "${TASK_NUMBERS[@]:-}"; do
+    [[ -z "$t" ]] && continue
+    gh issue close "$t" $REPO_ARG --reason "not planned" \
+      --comment "Superseded by second /engineer run in smoke test" >/dev/null 2>&1 || true
+  done
+
+  REDEVISE_YAML_BLOCK=$(echo "$REDEVISE_BODY" | awk '/^```yaml[[:space:]]*$/{flag=1;next}/^```[[:space:]]*$/{flag=0}flag')
+  TASK_NUMBERS=()
+  if [[ -n "$REDEVISE_YAML_BLOCK" ]]; then
+    while IFS= read -r n; do
+      [[ -n "$n" ]] && TASK_NUMBERS+=("$n")
+    done < <(echo "$REDEVISE_YAML_BLOCK" | grep -oE 'tasks:[[:space:]]*\[[^]]*\]' | grep -oE '[0-9]+' || true)
+  fi
+else
+  fail "Skipping design-zone-survival assertions — second engineer-agent run did not complete"
+fi
+echo ""
+
+# --- Reproduce the tactical-zone-preservation fix for /architect re-runs ---
+# Companion to the #164 regression above, but for the *other* re-entrant
+# workflow: /architect re-run on a feature that already has a tactical
+# zone (markers + YAML wave plan) must preserve that zone verbatim while
+# rewriting only the design zone above it. Starts from the state this script
+# already reached above (the feature body has markers and a real YAML wave
+# plan from the second /engineer run). Captures a task-number sentinel
+# from the tactical zone, re-runs /architect, and asserts the tactical
+# zone survives verbatim below a freshly-written design zone.
+echo "[7/9] Reproducing /architect re-run regression (tactical zone must survive)..."
+if [[ "$REDEVISE_RC" -ne 0 ]]; then
+  fail "Skipping design re-run assertions — second engineer-agent run did not complete"
+elif [[ ${#TASK_NUMBERS[@]:-0} -eq 0 ]]; then
+  fail "Skipping design re-run assertions — no task numbers to use as a tactical sentinel"
+else
+  DESIGN_TACTICAL_SENTINEL="#${TASK_NUMBERS[0]}"
+  PRE_DESIGN_BODY=$(gh issue view $FEATURE $REPO_ARG --json body --jq '.body')
+
+  if echo "$PRE_DESIGN_BODY" | grep -qF "$DESIGN_TACTICAL_SENTINEL"; then
+    pass "Tactical sentinel ($DESIGN_TACTICAL_SENTINEL) present before /architect re-run"
+  else
+    fail "Tactical sentinel ($DESIGN_TACTICAL_SENTINEL) missing before /architect re-run — cannot set up the test"
+  fi
+
+  DESIGN_COMMENT_URL=$(gh issue comment $FEATURE $REPO_ARG --body "/architect sonnet low")
+  DESIGN_COMMENT_ID=$(echo "$DESIGN_COMMENT_URL" | grep -oE 'issuecomment-[0-9]+' | grep -oE '[0-9]+$' || echo "")
+  echo "  /architect comment posted (id: ${DESIGN_COMMENT_ID:-unknown})"
+
+  DESIGN_RC=0
+  if [[ -z "${DESIGN_COMMENT_ID:-}" ]]; then
+    fail "cannot track architect-agent run — missing DESIGN_COMMENT_ID"
+    DESIGN_RC=1
+  else
+    wait_for_reaction "$DESIGN_COMMENT_ID" 600 "architect-agent" || DESIGN_RC=$?
+    case $DESIGN_RC in
+      0) pass "architect-agent run completed successfully" ;;
+      1) fail "architect-agent run failed (😕 reaction on /architect comment)" ;;
+      2) fail "architect-agent run did not complete within 10 min" ;;
+    esac
+  fi
+
+  if [[ "$DESIGN_RC" -eq 0 ]]; then
+    DESIGN_BODY=$(gh issue view $FEATURE $REPO_ARG --json body --jq '.body')
+
+    if echo "$DESIGN_BODY" | grep -qE '^[[:space:]]*<!-- autoducks:tactical:begin -->[[:space:]]*$' && \
+       echo "$DESIGN_BODY" | grep -qE '^[[:space:]]*<!-- autoducks:tactical:end -->[[:space:]]*$'; then
+      pass "Tactical zone markers present after /architect re-run"
+    else
+      fail "Tactical zone markers LOST after /architect re-run"
+    fi
+
+    if echo "$DESIGN_BODY" | grep -qF "$DESIGN_TACTICAL_SENTINEL"; then
+      pass "Tactical sentinel ($DESIGN_TACTICAL_SENTINEL) survived the /architect re-run"
+    else
+      fail "Tactical sentinel ($DESIGN_TACTICAL_SENTINEL) LOST after /architect re-run"
+    fi
+
+    BEGIN_LINE=$(echo "$DESIGN_BODY" | grep -nE '^[[:space:]]*<!-- autoducks:tactical:begin -->[[:space:]]*$' | head -1 | cut -d: -f1 || echo "")
+    SENTINEL_LINE=$(echo "$DESIGN_BODY" | grep -nF "$DESIGN_TACTICAL_SENTINEL" | head -1 | cut -d: -f1 || echo "")
+    if [[ -n "$SENTINEL_LINE" && -n "$BEGIN_LINE" && "$SENTINEL_LINE" -gt "$BEGIN_LINE" ]]; then
+      pass "Tactical sentinel appears below the tactical:begin marker (tactical zone preserved in place)"
+    else
+      fail "Tactical sentinel does not appear below the tactical:begin marker (tactical zone corrupted or misplaced)"
+    fi
+
+    # "## Problem Statement" is a required section of every design spec the
+    # architect-agent writes (.autoducks/agents/architect/prompt.md) — a stable,
+    # LLM-independent sentinel that the design zone was actually rewritten,
+    # not just left stale above the preserved tactical zone.
+    DESIGN_SENTINEL_LINE=$(echo "$DESIGN_BODY" | grep -nE '^## Problem Statement[[:space:]]*$' | head -1 | cut -d: -f1 || echo "")
+    if [[ -n "$DESIGN_SENTINEL_LINE" && -n "$BEGIN_LINE" && "$DESIGN_SENTINEL_LINE" -lt "$BEGIN_LINE" ]]; then
+      pass "Fresh design spec ('## Problem Statement') appears above the tactical:begin marker"
+    else
+      fail "Fresh design spec heading missing or not above the tactical:begin marker"
+    fi
+  else
+    fail "Skipping tactical-zone-survival assertions — architect-agent run did not complete"
+  fi
+fi
+echo ""
+
+# --- Markerless-body /architect run must add no tactical markers ---
+# Inverse case, on a throwaway issue so it doesn't disturb the feature's
+# revert flow below: /architect on a body with no markers at all must
+# write the design spec as the full body and introduce no tactical markers
+# (mirrors the markerless fallback path pre.sh/post.sh take when
+# body_has_markers is false).
+echo "  Verifying markerless-body /architect run adds no tactical markers..."
+MARKERLESS_BODY=$(cat <<EOF
+# Design markerless smoke test — ${TIMESTAMP}
+
+A tiny, narrow feature description with no tactical markers at all, used to
+confirm \`/architect\` on a markerless body writes the design spec as the
+full issue body and does not introduce tactical zone markers.
+EOF
+)
+MARKERLESS_URL=$(gh issue create $REPO_ARG \
+  --title "Smoke [design markerless] ${TIMESTAMP}" \
+  --label "smoke-test" \
+  --body "$MARKERLESS_BODY")
+MARKERLESS_ISSUE=$(echo "$MARKERLESS_URL" | grep -oE '[0-9]+$')
+echo "  Markerless issue: #$MARKERLESS_ISSUE → $MARKERLESS_URL"
+
+MARKERLESS_COMMENT_URL=$(gh issue comment $MARKERLESS_ISSUE $REPO_ARG --body "/architect sonnet low")
+MARKERLESS_COMMENT_ID=$(echo "$MARKERLESS_COMMENT_URL" | grep -oE 'issuecomment-[0-9]+' | grep -oE '[0-9]+$' || echo "")
+echo "  /architect comment posted (id: ${MARKERLESS_COMMENT_ID:-unknown})"
+
+MARKERLESS_RC=0
+if [[ -z "${MARKERLESS_COMMENT_ID:-}" ]]; then
+  fail "cannot track markerless architect-agent run — missing MARKERLESS_COMMENT_ID"
+  MARKERLESS_RC=1
+else
+  wait_for_reaction "$MARKERLESS_COMMENT_ID" 600 "architect-agent (markerless)" || MARKERLESS_RC=$?
+  case $MARKERLESS_RC in
+    0) pass "markerless architect-agent run completed successfully" ;;
+    1) fail "markerless architect-agent run failed (😕 reaction on /architect comment)" ;;
+    2) fail "markerless architect-agent run did not complete within 10 min" ;;
+  esac
+fi
+
+if [[ "$MARKERLESS_RC" -eq 0 ]]; then
+  MARKERLESS_RESULT_BODY=$(gh issue view $MARKERLESS_ISSUE $REPO_ARG --json body --jq '.body')
+
+  if echo "$MARKERLESS_RESULT_BODY" | grep -qE '<!-- autoducks:tactical:(begin|end) -->'; then
+    fail "Tactical markers introduced on a markerless /architect run (expected none)"
+  else
+    pass "No tactical markers introduced on markerless /architect run"
+  fi
+
+  if [[ "$MARKERLESS_RESULT_BODY" != "$MARKERLESS_BODY" ]]; then
+    pass "Design spec written as the full body on markerless /architect run"
+  else
+    fail "Body unchanged — architect-agent did not write a design spec on the markerless issue"
+  fi
+else
+  fail "Skipping markerless-body assertions — architect-agent run did not complete"
+fi
+
+gh issue close $MARKERLESS_ISSUE $REPO_ARG --comment "Smoke test complete — closing." 2>/dev/null || true
+echo ""
+
+# --- Trigger /revert (unless --keep) ---
 if [[ "$KEEP" == true ]]; then
-  echo "[6/7] Skipping /agents revert (--keep). Test complete."
+  echo "[8/9] Skipping /revert (--keep). Test complete."
   echo ""
   echo "=== Summary ==="
   echo "  Fail:    $FAIL"
@@ -333,43 +883,25 @@ if [[ "$KEEP" == true ]]; then
   [[ $FAIL -eq 0 ]] && echo "✅ Plan-pipeline assertions passed (kept state)." && exit 0 || { echo "❌ Plan-pipeline assertions failed."; exit 1; }
 fi
 
-echo "[6/7] Triggering /agents revert..."
-REVERT_COMMENT_URL=$(gh issue comment $FEATURE $REPO_ARG --body "/agents revert")
+echo "[8/9] Triggering /revert..."
+REVERT_COMMENT_URL=$(gh issue comment $FEATURE $REPO_ARG --body "/revert")
 REVERT_COMMENT_ID=$(echo "$REVERT_COMMENT_URL" | grep -oE 'issuecomment-[0-9]+' | grep -oE '[0-9]+$' || echo "")
 echo "  Revert comment posted (id: ${REVERT_COMMENT_ID:-unknown})"
 
-# Wait for revert run
-sleep 5
-REVERT_CUTOFF=$(date -u -v-1M '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date -u -d '-1 min' '+%Y-%m-%dT%H:%M:%SZ')
-REVERT_RUN_ID=$(gh run list --workflow="Claude Agents — Revert" --limit 5 \
-  --json databaseId,createdAt,conclusion \
-  --jq "[.[] | select(.createdAt > \"$REVERT_CUTOFF\" and .conclusion != \"skipped\")] | .[0].databaseId // empty" 2>/dev/null || echo "")
-
-if [[ -z "$REVERT_RUN_ID" ]]; then
-  fail "revert run did not appear"
-  exit 1
-fi
-echo "  Revert run: $REVERT_RUN_ID"
-
-REVERT_WAITED=0
-while [[ $REVERT_WAITED -lt 120 ]]; do
-  STATUS=$(gh run view $REVERT_RUN_ID --json status,conclusion --jq '.status + "|" + (.conclusion // "")' 2>/dev/null || echo "")
-  if [[ "$STATUS" == completed* ]]; then
-    CONCLUSION=$(echo "$STATUS" | cut -d'|' -f2)
-    if [[ "$CONCLUSION" == "success" ]]; then
-      pass "revert run completed (${REVERT_WAITED}s)"
-    else
-      fail "revert run conclusion=$CONCLUSION"
-    fi
-    break
-  fi
-  sleep 10
-  REVERT_WAITED=$((REVERT_WAITED + 10))
-done
+# Revert deletes its own triggering comment, so reactions aren't a
+# viable signal. Watch the side effect instead: feature/draft labels
+# stripped from the feature issue. Issue-scoped, so parallel reverts
+# on other features don't cross-talk.
+REVERT_RC=0
+wait_for_feature_unplanned "$FEATURE" 120 || REVERT_RC=$?
+case $REVERT_RC in
+  0) pass "revert completed (labels stripped + comments deleted on #$FEATURE)" ;;
+  2) fail "revert did not reach terminal state within 2 min" ;;
+esac
 echo ""
 
 # --- Assert revert effects ---
-echo "[7/7] Asserting revert state..."
+echo "[9/9] Asserting revert state..."
 
 # Tasks should be closed
 for t in "${TASK_NUMBERS[@]:-}"; do
@@ -384,10 +916,10 @@ done
 
 # Feature labels stripped
 FINAL_LABELS=$(gh issue view $FEATURE $REPO_ARG --json labels --jq '[.labels[].name] | join(",")')
-if ! echo "$FINAL_LABELS" | grep -q "feature"; then
-  pass "Label 'feature' removed from #$FEATURE"
+if ! echo "$FINAL_LABELS" | grep -q "Tactics:done"; then
+  pass "Label 'Tactics:done' removed from #$FEATURE"
 else
-  fail "Label 'feature' still present (got: $FINAL_LABELS)"
+  fail "Label 'Tactics:done' still present (got: $FINAL_LABELS)"
 fi
 if ! echo "$FINAL_LABELS" | grep -q "draft"; then
   pass "Label 'draft' removed from #$FEATURE"

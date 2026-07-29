@@ -1,0 +1,223 @@
+name: 'Autoducks: Maestro Agent'
+
+on:
+  workflow_dispatch:
+    inputs:
+      feature_issue:
+        required: true
+        type: string
+      auto_chain:
+        required: false
+        type: string
+        default: ''
+      actor:
+        required: false
+        type: string
+        default: ''
+      model:
+        required: false
+        type: string
+        default: ''
+      effort:
+        required: false
+        type: string
+        default: ''
+      max_turns:
+        required: false
+        type: string
+        default: ''
+      mode:
+        required: false
+        type: string
+        default: ''
+  pull_request:
+    types: [closed]
+  issue_comment:
+    types: [created]
+
+permissions:
+  id-token: write
+  contents: write
+  issues: write
+  pull-requests: write
+  actions: write
+
+# Serialize wave transitions per feature. A wave finishing merges several
+# task PRs near-simultaneously; each merge fires a `pull_request: closed`
+# event, so GitHub would otherwise run several Maestros in parallel. Each
+# independently recomputes the same "next wave" and dispatches it, because
+# prevent_duplicate_dispatch only sees a duplicate once the first developer
+# has opened its PR (minutes later) — a race the parallel Maestros lose.
+# Grouping per feature makes them run one at a time: the second Maestro only
+# starts after the first has dispatched, so its prevent_duplicate_dispatch
+# check sees the in-flight PR and skips instead of re-dispatching.
+#
+# All colliding `pull_request` events for a feature share the same base ref
+# (feature/NNN or fix/NNN), which is the natural key here; dispatch/comment
+# events key on the feature issue number instead. cancel-in-progress is
+# false — never abort a Maestro mid-dispatch — mirroring the developer.
+concurrency:
+  group: >-
+    autoducks-maestro-${{
+      github.event_name == 'workflow_dispatch' && inputs.feature_issue ||
+      github.event_name == 'issue_comment' && github.event.issue.number ||
+      github.event.pull_request.base.ref }}
+  cancel-in-progress: false
+
+jobs:
+  resolve:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'pull_request' &&
+       github.event.pull_request.merged == true &&
+       (startsWith(github.event.pull_request.base.ref, 'feature/') ||
+        startsWith(github.event.pull_request.base.ref, 'fix/'))) ||
+      (github.event_name == 'issue_comment' &&
+       github.event.issue.pull_request == null &&
+       github.event.comment.author_association != 'MANNEQUIN' &&
+       (startsWith(github.event.comment.body, '/execute') ||
+        startsWith(github.event.comment.body, '/work') ||
+        startsWith(github.event.comment.body, '/run')) &&
+       !(github.event.issue.type.name == 'Task' ||
+         contains(github.event.issue.labels.*.name, 'Task')) &&
+       contains(github.event.issue.labels.*.name, 'Tactics:done'))
+    runs-on: ubuntu-latest
+    outputs:
+      feature_number: ${{ steps.feature.outputs.number }}
+    steps:
+      - name: Mint app token
+        id: apptoken
+        shell: bash
+        env:
+          # Opt-in flag only (any non-empty value enables app mode). The broker
+          # URL is hardcoded below — if it ever moves, sync autoducks. Absent
+          # flag = skip before any network call, so PAT-only repos never reach
+          # the central broker.
+          AUTODUCKS_APP: ${{ vars.AUTODUCKS_APP }}
+        run: |
+          set -euo pipefail
+          if [ -z "${AUTODUCKS_APP:-}" ]; then
+            echo "value=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          BROKER="https://autoducks-api.gustavospgondim.workers.dev"
+          OIDC=$(curl -sf -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=autoducks-broker" | jq -r .value)
+          TOKEN=$(curl -sf -X POST -H "Authorization: Bearer $OIDC" \
+            "$BROKER/token" | jq -r .token)
+          echo "::add-mask::$TOKEN"
+          echo "value=$TOKEN" >> "$GITHUB_OUTPUT"
+          echo "AUTODUCKS_APP_TOKEN=$TOKEN" >> "$GITHUB_ENV"
+      - name: Determine feature issue
+        id: feature
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "number=${{ inputs.feature_issue }}" >> "$GITHUB_OUTPUT"
+          elif [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            NUM=$(echo "${{ github.event.pull_request.base.ref }}" | grep -oP '(?:feature|fix)/\K\d+')
+            echo "number=$NUM" >> "$GITHUB_OUTPUT"
+          else
+            echo "number=${{ github.event.issue.number }}" >> "$GITHUB_OUTPUT"
+          fi
+
+  orchestrate:
+    needs: resolve
+    if: needs.resolve.outputs.feature_number != ''
+    runs-on: ubuntu-latest
+    # NOTE: no job-level `concurrency` here. The workflow-level concurrency
+    # group above already serializes per feature. Re-declaring the same group
+    # at the job level makes GitHub detect a deadlock (a job cannot wait on the
+    # concurrency group its own workflow holds), which fails `orchestrate`
+    # instantly with no runner — breaking `/execute`, `/run`, `/work` and
+    # manual dispatch. See regression from "Serialize Maestro wave dispatch".
+    steps:
+      - name: Mint app token
+        id: apptoken
+        shell: bash
+        env:
+          # Opt-in flag only (any non-empty value enables app mode). The broker
+          # URL is hardcoded below — if it ever moves, sync autoducks. Absent
+          # flag = skip before any network call, so PAT-only repos never reach
+          # the central broker.
+          AUTODUCKS_APP: ${{ vars.AUTODUCKS_APP }}
+        run: |
+          set -euo pipefail
+          if [ -z "${AUTODUCKS_APP:-}" ]; then
+            echo "value=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          BROKER="https://autoducks-api.gustavospgondim.workers.dev"
+          OIDC=$(curl -sf -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=autoducks-broker" | jq -r .value)
+          TOKEN=$(curl -sf -X POST -H "Authorization: Bearer $OIDC" \
+            "$BROKER/token" | jq -r .token)
+          echo "::add-mask::$TOKEN"
+          echo "value=$TOKEN" >> "$GITHUB_OUTPUT"
+          echo "AUTODUCKS_APP_TOKEN=$TOKEN" >> "$GITHUB_ENV"
+      - uses: actions/checkout@v4
+      - name: Authorize
+        id: authz
+        run: bash .autoducks/core/security/authorize.sh
+        env:
+          AUTODUCKS_AGENT: maestro
+          ACTOR: ${{ github.event.comment.user.login || github.event.sender.login }}
+          AUTHOR_ASSOC: ${{ github.event.comment.author_association || github.event.issue.author_association }}
+          EVENT_NAME: ${{ github.event_name }}
+          ISSUE_NUM: ${{ github.event.issue.number }}
+          COMMENT_ID: ${{ github.event.comment.id || '0' }}
+          REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Parse directive
+        id: directive
+        if: steps.authz.outcome == 'success' && github.event_name == 'issue_comment'
+        run: source .autoducks/core/config/parse-directive.sh >> "$GITHUB_OUTPUT"
+        env:
+          COMMENT_BODY: ${{ github.event.comment.body }}
+      - name: User pre hook
+        if: >-
+          steps.authz.outcome == 'success' &&
+          hashFiles('.github/actions/autoducks/maestro-pre/action.yml') != ''
+        uses: ./.github/actions/autoducks/maestro-pre
+        env:
+          AUTODUCKS_AGENT: maestro
+          AUTODUCKS_STAGE: pre
+          ISSUE_NUM: ${{ needs.resolve.outputs.feature_number }}
+          REPO: ${{ github.repository }}
+          COMMENT_ID: ${{ github.event.comment.id || '0' }}
+          RUN_ID: ${{ github.run_id }}
+          COMMENTER: ${{ github.event.comment.user.login || inputs.actor || '' }}
+          GH_TOKEN: ${{ steps.apptoken.outputs.value || secrets.AUTODUCKS_PAT || secrets.GITHUB_TOKEN }}
+      - name: Run orchestrator
+        id: run
+        if: steps.authz.outcome == 'success'
+        run: bash .autoducks/agents/maestro/run.sh
+        env:
+          FEATURE_ISSUE: ${{ needs.resolve.outputs.feature_number }}
+          REPO: ${{ github.repository }}
+          COMMENT_ID: ${{ github.event.comment.id || '0' }}
+          RUN_ID: ${{ github.run_id }}
+          COMMENTER: ${{ github.event.comment.user.login || inputs.actor || '' }}
+          AUTO_CHAIN: ${{ steps.directive.outputs.auto_chain || inputs.auto_chain || '' }}
+          WORKER_MODEL: ${{ steps.directive.outputs.model || inputs.model || '' }}
+          WORKER_EFFORT: ${{ steps.directive.outputs.effort || inputs.effort || '' }}
+          WORKER_MAX_TURNS: ${{ steps.directive.outputs.max_turns || inputs.max_turns || '' }}
+          OVERRIDE_MODEL: ${{ steps.directive.outputs.model || inputs.model || '' }}
+          OVERRIDE_EFFORT: ${{ steps.directive.outputs.effort || inputs.effort || '' }}
+          OVERRIDE_MAX_TURNS: ${{ steps.directive.outputs.max_turns || inputs.max_turns || '' }}
+          OVERRIDE_MODE: ${{ steps.directive.outputs.mode || inputs.mode || '' }}
+          GH_TOKEN: ${{ steps.apptoken.outputs.value || secrets.AUTODUCKS_PAT || secrets.GITHUB_TOKEN }}
+      - name: User post hook
+        if: >-
+          always() && steps.authz.outcome == 'success' &&
+          hashFiles('.github/actions/autoducks/maestro-post/action.yml') != ''
+        uses: ./.github/actions/autoducks/maestro-post
+        env:
+          AUTODUCKS_AGENT: maestro
+          AUTODUCKS_STAGE: post
+          ISSUE_NUM: ${{ needs.resolve.outputs.feature_number }}
+          REPO: ${{ github.repository }}
+          COMMENT_ID: ${{ github.event.comment.id || '0' }}
+          RUN_ID: ${{ github.run_id }}
+          COMMENTER: ${{ github.event.comment.user.login || inputs.actor || '' }}
+          AGENT_OUTCOME: ${{ steps.run.outcome }}
+          GH_TOKEN: ${{ steps.apptoken.outputs.value || secrets.AUTODUCKS_PAT || secrets.GITHUB_TOKEN }}

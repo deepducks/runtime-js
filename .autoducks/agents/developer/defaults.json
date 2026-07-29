@@ -1,0 +1,5 @@
+{
+  "model": "claude-sonnet-5",
+  "effort": "high",
+  "tools": ["Read","Write","Edit","Bash"]
+}

@@ -1,0 +1,195 @@
+name: 'Autoducks LLM - Claude'
+description: 'Invoke Claude via claude-code-action for autoducks agents'
+
+inputs:
+  prompt_file:
+    description: 'Path to the agent prompt markdown file'
+    required: true
+  allowed_tools:
+    description: 'Comma-separated list of tools the agent can use'
+    required: true
+  model:
+    description: 'Claude model to use'
+    required: false
+    default: 'claude-sonnet-5'
+  effort:
+    description: 'Effort level (off, low, medium, high, max)'
+    required: false
+    default: 'high'
+  max_turns:
+    description: 'Maximum number of agentic turns'
+    required: false
+    default: ''
+  timeout_minutes:
+    description: 'Timeout in minutes'
+    required: false
+    default: '60'
+  anthropic_api_key:
+    description: 'Anthropic API key (used if claude_code_oauth_token not set)'
+    required: false
+    default: ''
+  claude_code_oauth_token:
+    description: 'Claude Code OAuth token'
+    required: false
+    default: ''
+  anthropic_base_url:
+    description: 'Anthropic-compatible endpoint to call instead of api.anthropic.com (gateway, proxy, self-hosted relay). Empty = the default Anthropic API.'
+    required: false
+    default: ''
+  anthropic_auth_token:
+    description: 'Bearer credential for the custom endpoint (sent as Authorization: Bearer). Only used when anthropic_base_url is set; gateways that authenticate with x-api-key can pass anthropic_api_key instead.'
+    required: false
+    default: ''
+  github_token:
+    description: 'GitHub token claude-code-action uses for its own git/API ops (comments, commits). Pass the autoducks app IAT to author them as the app; empty falls back to the ambient GITHUB_TOKEN (github-actions[bot]).'
+    required: false
+    default: ''
+
+outputs:
+  error_subtype:
+    description: 'Claude result subtype when the run errored, e.g. "error_max_turns", "error_during_execution"; empty on success'
+    value: ${{ steps.result.outputs.error_subtype }}
+  is_error:
+    description: '"true" if the Claude run ended in error, "false" otherwise'
+    value: ${{ steps.result.outputs.is_error }}
+  conclusion:
+    description: '"success" or "failure"'
+    value: ${{ steps.result.outputs.conclusion }}
+  skipped:
+    description: '"true" if claude-code-action was skipped before executing (e.g. workflow-validation skip on a PR that edits the workflow); "false" otherwise'
+    value: ${{ steps.result.outputs.skipped }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Read prompt
+      id: prompt
+      shell: bash
+      run: |
+        PROMPT=$(PROMPT_FILE="${AUTODUCKS_PINNED_ROOT:-.}/${{ inputs.prompt_file }}" bash "${AUTODUCKS_PINNED_ROOT:-.}/.autoducks/core/config/resolve-prompt.sh")
+        {
+          echo "content<<PROMPT_EOF"
+          echo "$PROMPT"
+          echo "PROMPT_EOF"
+        } >> "$GITHUB_OUTPUT"
+    - name: Build claude args
+      id: args
+      shell: bash
+      env:
+        MODEL: ${{ inputs.model }}
+        MAX_TURNS: ${{ inputs.max_turns }}
+        ALLOWED_TOOLS: ${{ inputs.allowed_tools }}
+        EFFORT: ${{ inputs.effort }}
+        PROMPT_FILE: ${{ inputs.prompt_file }}
+      run: |
+        MT="${MAX_TURNS:-}"
+        [[ -z "$MT" ]] && MT="50"
+
+        AGENT="$(basename "$(dirname "$PROMPT_FILE")")"
+        ROOT="${AUTODUCKS_PINNED_ROOT:-.}"
+
+        DELTA_FILE="$ROOT/.autoducks/providers/llm/claude/compiled/$AGENT.allowed-tools"
+        if [[ -f "$DELTA_FILE" ]]; then
+          declare -A SEEN
+          UNION=()
+          IFS=',' read -ra INPUT_TOOLS <<< "$ALLOWED_TOOLS"
+          for t in "${INPUT_TOOLS[@]}"; do
+            [[ -z "$t" ]] && continue
+            if [[ -z "${SEEN[$t]:-}" ]]; then
+              SEEN[$t]=1
+              UNION+=("$t")
+            fi
+          done
+          while IFS= read -r t; do
+            [[ -z "$t" ]] && continue
+            if [[ -z "${SEEN[$t]:-}" ]]; then
+              SEEN[$t]=1
+              UNION+=("$t")
+            fi
+          done < <(sort "$DELTA_FILE")
+          EFFECTIVE_TOOLS="$(IFS=,; echo "${UNION[*]}")"
+        else
+          EFFECTIVE_TOOLS="$ALLOWED_TOOLS"
+        fi
+
+        ARGS="--model $MODEL --max-turns $MT --allowedTools '$EFFECTIVE_TOOLS'"
+
+        case "$EFFORT" in
+          low|medium|high|max) ARGS="$ARGS --effort $EFFORT" ;;
+          off)                 THINKING_DISABLED=1 ;;   # no --effort; disable via env below
+          *)                   ARGS="$ARGS --effort high" ;;
+        esac
+        echo "claude_args=$ARGS" >> "$GITHUB_OUTPUT"
+        echo "max_thinking_tokens=${THINKING_DISABLED:+0}" >> "$GITHUB_OUTPUT"
+
+        COMPILED_SETTINGS="$ROOT/.autoducks/providers/llm/claude/compiled/$AGENT.settings.json"
+        BASE_SETTINGS="$ROOT/.autoducks/providers/llm/claude/settings.json"
+        if [[ -f "$COMPILED_SETTINGS" ]]; then
+          echo "settings=$COMPILED_SETTINGS" >> "$GITHUB_OUTPUT"
+        elif [[ -f "$BASE_SETTINGS" ]]; then
+          echo "settings=$BASE_SETTINGS" >> "$GITHUB_OUTPUT"
+        else
+          echo "settings=" >> "$GITHUB_OUTPUT"
+        fi
+    - name: Resolve endpoint credentials
+      id: endpoint
+      shell: bash
+      env:
+        BASE_URL: ${{ inputs.anthropic_base_url }}
+        AUTH_TOKEN: ${{ inputs.anthropic_auth_token }}
+        API_KEY: ${{ inputs.anthropic_api_key }}
+        OAUTH_TOKEN: ${{ inputs.claude_code_oauth_token }}
+      run: bash "$GITHUB_ACTION_PATH/resolve-endpoint.sh"
+    - name: Run Claude agent
+      id: claude
+      uses: anthropics/claude-code-action@v1
+      env:
+        MAX_THINKING_TOKENS: ${{ steps.args.outputs.max_thinking_tokens }}
+      with:
+        prompt: ${{ steps.prompt.outputs.content }}
+        anthropic_api_key: ${{ steps.endpoint.outputs.api_key }}
+        claude_code_oauth_token: ${{ steps.endpoint.outputs.oauth_token }}
+        github_token: ${{ inputs.github_token || github.token }}
+        allowed_bots: '*'
+        claude_args: ${{ steps.args.outputs.claude_args }}
+        settings: ${{ steps.args.outputs.settings }}
+    - name: Parse Claude result
+      id: result
+      if: always()
+      shell: bash
+      env:
+        EXECUTION_FILE: ${{ steps.claude.outputs.execution_file }}
+        STEP_OUTCOME: ${{ steps.claude.outcome }}
+      run: |
+        # Vendor-specific parsing of claude-code-action's execution log lives
+        # here so runtimes/scripts only ever see the normalized outputs below.
+        ERROR_SUBTYPE=""
+        IS_ERROR="false"
+
+        if [[ -n "$EXECUTION_FILE" && -f "$EXECUTION_FILE" ]]; then
+          RESULT_ENTRY=$(jq -c '[.[]? | select(.type == "result")] | last // empty' "$EXECUTION_FILE" 2>/dev/null || true)
+          if [[ -n "$RESULT_ENTRY" ]]; then
+            IS_ERROR=$(echo "$RESULT_ENTRY" | jq -r 'if .is_error == true then "true" else "false" end')
+            if [[ "$IS_ERROR" == "true" ]]; then
+              ERROR_SUBTYPE=$(echo "$RESULT_ENTRY" | jq -r '.subtype // ""')
+            fi
+          fi
+        fi
+
+        CONCLUSION="success"
+        if [[ "$IS_ERROR" == "true" || "$STEP_OUTCOME" == "failure" ]]; then
+          CONCLUSION="failure"
+        fi
+
+        SKIPPED="false"
+        if [[ "$STEP_OUTCOME" != "failure" && ( -z "$EXECUTION_FILE" || ! -f "$EXECUTION_FILE" ) ]]; then
+          SKIPPED="true"
+          ERROR_SUBTYPE="workflow_validation_skip"
+        fi
+
+        {
+          echo "error_subtype=$ERROR_SUBTYPE"
+          echo "is_error=$IS_ERROR"
+          echo "conclusion=$CONCLUSION"
+          echo "skipped=$SKIPPED"
+        } >> "$GITHUB_OUTPUT"

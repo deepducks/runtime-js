@@ -1,0 +1,253 @@
+name: 'Autoducks: Developer Agent'
+
+on:
+  issue_comment:
+    types: [created]
+  workflow_dispatch:
+    inputs:
+      issue_number:
+        required: true
+        type: string
+      base_branch:
+        required: true
+        type: string
+        default: 'main'
+      actor:
+        required: false
+        type: string
+        default: ''
+      model:
+        required: false
+        type: string
+        default: ''
+      effort:
+        required: false
+        type: string
+        default: ''
+      max_turns:
+        required: false
+        type: string
+        default: ''
+      iteration:
+        required: false
+        type: string
+        default: '1'
+      max_iterations:
+        required: false
+        type: string
+        default: ''
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+  actions: write
+  id-token: write
+
+# Serialize duplicate dispatches of the SAME task. When two Maestro runs
+# both dispatch task N before either developer creates a PR, the second run
+# queues behind the first; by the time it runs, the first's PR exists (open
+# or merged), so pre.sh's idempotency guard skips it instead of producing a
+# duplicate branch.
+concurrency:
+  group: autoducks-developer-${{ github.event_name == 'workflow_dispatch' && inputs.issue_number || github.event.issue.number }}
+  cancel-in-progress: false
+
+jobs:
+  developer:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'issue_comment' &&
+       github.event.issue.pull_request == null &&
+       github.event.comment.author_association != 'MANNEQUIN' &&
+       (startsWith(github.event.comment.body, '/execute') ||
+        startsWith(github.event.comment.body, '/work') ||
+        startsWith(github.event.comment.body, '/run')) &&
+       (github.event.issue.type.name == 'Task' ||
+        contains(github.event.issue.labels.*.name, 'Task')))
+    runs-on: ubuntu-latest
+    steps:
+      - name: Mint app token
+        id: apptoken
+        shell: bash
+        env:
+          # Opt-in flag only (any non-empty value enables app mode). The broker
+          # URL is hardcoded below — if it ever moves, sync autoducks. Absent
+          # flag = skip before any network call, so PAT-only repos never reach
+          # the central broker.
+          AUTODUCKS_APP: ${{ vars.AUTODUCKS_APP }}
+        run: |
+          set -euo pipefail
+          if [ -z "${AUTODUCKS_APP:-}" ]; then
+            echo "value=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          BROKER="https://autoducks-api.gustavospgondim.workers.dev"
+          OIDC=$(curl -sf -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=autoducks-broker" | jq -r .value)
+          TOKEN=$(curl -sf -X POST -H "Authorization: Bearer $OIDC" \
+            "$BROKER/token" | jq -r .token)
+          echo "::add-mask::$TOKEN"
+          echo "value=$TOKEN" >> "$GITHUB_OUTPUT"
+          echo "AUTODUCKS_APP_TOKEN=$TOKEN" >> "$GITHUB_ENV"
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.base_branch || 'main' }}
+          fetch-depth: 0
+          submodules: recursive
+          token: ${{ steps.apptoken.outputs.value || secrets.AUTODUCKS_PAT || secrets.GITHUB_TOKEN }}
+      # Pin the machinery to the pipeline's cut commit BEFORE the agent runs, so
+      # an agent editing .autoducks on its own branch cannot corrupt the scripts
+      # that run its build, and the machinery cannot drift across waves/reviews
+      # (bug #952). Every later step runs from "${AUTODUCKS_PINNED_ROOT}/.autoducks".
+      - name: Snapshot machinery
+        id: snapshot
+        run: bash .autoducks/core/robustness/snapshot-machinery.sh
+      - name: Authorize
+        id: authz
+        run: bash "${AUTODUCKS_PINNED_ROOT:-.}/.autoducks/core/security/authorize.sh"
+        env:
+          AUTODUCKS_AGENT: developer
+          ACTOR: ${{ github.event.comment.user.login || github.event.sender.login }}
+          AUTHOR_ASSOC: ${{ github.event.comment.author_association || github.event.issue.author_association }}
+          EVENT_NAME: ${{ github.event_name }}
+          ISSUE_NUM: ${{ github.event.issue.number || inputs.issue_number }}
+          COMMENT_ID: ${{ github.event.comment.id || '0' }}
+          REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Load agent defaults
+        id: agent
+        if: steps.authz.outcome == 'success'
+        run: AUTODUCKS_AGENT=developer bash "${AUTODUCKS_PINNED_ROOT:-.}/.autoducks/core/config/load-agent-defaults.sh" >> "$GITHUB_OUTPUT"
+      - name: Set context
+        id: ctx
+        if: steps.authz.outcome == 'success'
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "issue_num=${{ inputs.issue_number }}" >> "$GITHUB_OUTPUT"
+            echo "base_branch=${{ inputs.base_branch }}" >> "$GITHUB_OUTPUT"
+            echo "model=${{ inputs.model }}" >> "$GITHUB_OUTPUT"
+            echo "effort=${{ inputs.effort }}" >> "$GITHUB_OUTPUT"
+            echo "max_turns=${{ inputs.max_turns }}" >> "$GITHUB_OUTPUT"
+            echo "commenter=${{ inputs.actor }}" >> "$GITHUB_OUTPUT"
+            echo "iteration=${{ inputs.iteration }}" >> "$GITHUB_OUTPUT"
+            echo "max_iterations=${{ inputs.max_iterations }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "issue_num=${{ github.event.issue.number }}" >> "$GITHUB_OUTPUT"
+            echo "base_branch=" >> "$GITHUB_OUTPUT"
+            echo "commenter=${{ github.event.comment.user.login }}" >> "$GITHUB_OUTPUT"
+            echo "iteration=1" >> "$GITHUB_OUTPUT"
+            source "${AUTODUCKS_PINNED_ROOT:-.}/.autoducks/core/config/parse-directive.sh" >> "$GITHUB_OUTPUT"
+          fi
+        env:
+          COMMENT_BODY: ${{ github.event.comment.body || '' }}
+      - name: Pre-execution
+        id: pre
+        if: steps.authz.outcome == 'success'
+        run: bash "${AUTODUCKS_PINNED_ROOT:-.}/.autoducks/agents/developer/pre.sh"
+        env:
+          ISSUE_NUM: ${{ steps.ctx.outputs.issue_num }}
+          BASE_BRANCH: ${{ steps.ctx.outputs.base_branch }}
+          REPO: ${{ github.repository }}
+          COMMENT_ID: ${{ github.event.comment.id || '0' }}
+          RUN_ID: ${{ github.run_id }}
+          COMMENTER: ${{ steps.ctx.outputs.commenter }}
+          ITERATION: ${{ steps.ctx.outputs.iteration }}
+          GH_TOKEN: ${{ steps.apptoken.outputs.value || secrets.AUTODUCKS_PAT || secrets.GITHUB_TOKEN }}
+      - name: User pre hook
+        if: >-
+          steps.authz.outcome == 'success' &&
+          steps.pre.outputs.duplicate_skip != 'true' &&
+          steps.pre.outputs.dor_skip != 'true' &&
+          hashFiles('.github/actions/autoducks/developer-pre/action.yml') != ''
+        uses: ./.github/actions/autoducks/developer-pre
+        env:
+          AUTODUCKS_AGENT: developer
+          AUTODUCKS_STAGE: pre
+          ISSUE_NUM: ${{ steps.ctx.outputs.issue_num }}
+          BASE_BRANCH: ${{ steps.ctx.outputs.base_branch }}
+          REPO: ${{ github.repository }}
+          COMMENT_ID: ${{ github.event.comment.id || '0' }}
+          RUN_ID: ${{ github.run_id }}
+          COMMENTER: ${{ steps.ctx.outputs.commenter }}
+          GH_TOKEN: ${{ steps.apptoken.outputs.value || secrets.AUTODUCKS_PAT || secrets.GITHUB_TOKEN }}
+      - name: Run LLM agent
+        id: llm
+        if: >-
+          steps.authz.outcome == 'success' &&
+          steps.pre.outputs.duplicate_skip != 'true' &&
+          steps.pre.outputs.dor_skip != 'true'
+        uses: ./.autoducks/providers/llm/claude
+        with:
+          prompt_file: .autoducks/agents/developer/prompt.md
+          allowed_tools: ${{ steps.agent.outputs.tools }}
+          model: ${{ steps.ctx.outputs.model || steps.agent.outputs.model }}
+          effort: ${{ steps.ctx.outputs.effort || steps.agent.outputs.effort }}
+          max_turns: ${{ steps.ctx.outputs.max_turns || steps.agent.outputs.max_turns }}
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          anthropic_base_url: ${{ secrets.ANTHROPIC_BASE_URL || vars.ANTHROPIC_BASE_URL }}
+          anthropic_auth_token: ${{ secrets.ANTHROPIC_AUTH_TOKEN }}
+          github_token: ${{ steps.apptoken.outputs.value }}
+      - name: User post hook
+        if: >-
+          always() && steps.authz.outcome == 'success' &&
+          steps.pre.outputs.duplicate_skip != 'true' &&
+          steps.pre.outputs.dor_skip != 'true' &&
+          hashFiles('.github/actions/autoducks/developer-post/action.yml') != ''
+        uses: ./.github/actions/autoducks/developer-post
+        env:
+          AUTODUCKS_AGENT: developer
+          AUTODUCKS_STAGE: post
+          ISSUE_NUM: ${{ steps.ctx.outputs.issue_num }}
+          BASE_BRANCH: ${{ steps.ctx.outputs.base_branch }}
+          REPO: ${{ github.repository }}
+          COMMENT_ID: ${{ github.event.comment.id || '0' }}
+          RUN_ID: ${{ github.run_id }}
+          COMMENTER: ${{ steps.ctx.outputs.commenter }}
+          AGENT_OUTCOME: ${{ steps.llm.outcome }}
+          GH_TOKEN: ${{ steps.apptoken.outputs.value || secrets.AUTODUCKS_PAT || secrets.GITHUB_TOKEN }}
+      - name: Post-execution
+        id: post
+        if: >-
+          always() && steps.authz.outcome == 'success' &&
+          steps.pre.outputs.duplicate_skip != 'true' &&
+          steps.pre.outputs.dor_skip != 'true'
+        run: bash "${AUTODUCKS_PINNED_ROOT:-.}/.autoducks/agents/developer/post.sh"
+        env:
+          ISSUE_NUM: ${{ steps.ctx.outputs.issue_num }}
+          BASE_BRANCH: ${{ steps.ctx.outputs.base_branch }}
+          REPO: ${{ github.repository }}
+          COMMENT_ID: ${{ github.event.comment.id || '0' }}
+          RUN_ID: ${{ github.run_id }}
+          COMMENTER: ${{ steps.ctx.outputs.commenter }}
+          ITERATION: ${{ steps.ctx.outputs.iteration }}
+          MODEL: ${{ steps.ctx.outputs.model || steps.agent.outputs.model }}
+          EFFORT: ${{ steps.ctx.outputs.effort || steps.agent.outputs.effort }}
+          MAX_TURNS: ${{ steps.ctx.outputs.max_turns || steps.agent.outputs.max_turns }}
+          MAX_ITERATIONS: ${{ steps.ctx.outputs.max_iterations }}
+          JOB_STATUS: ${{ job.status }}
+          GH_TOKEN: ${{ steps.apptoken.outputs.value || secrets.AUTODUCKS_PAT || secrets.GITHUB_TOKEN }}
+          LLM_ERROR_SUBTYPE: ${{ steps.llm.outputs.error_subtype }}
+          LLM_SKIPPED: ${{ steps.llm.outputs.skipped }}
+      # Last-resort backstop: if the LLM step failed or Post-execution did not
+      # report cleanly (e.g. a corrupted hook that still exits 0), post a notice
+      # from pure YAML so a broken hook can never silently freeze a wave (#952).
+      - name: Failure watchdog
+        if: >-
+          always() && steps.authz.outcome == 'success' &&
+          steps.pre.outputs.duplicate_skip != 'true' &&
+          steps.pre.outputs.dor_skip != 'true' &&
+          (steps.llm.outcome == 'failure' || steps.post.outcome != 'success')
+        env:
+          ISSUE_NUM: ${{ steps.ctx.outputs.issue_num }}
+          RUN_ID: ${{ github.run_id }}
+          REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ steps.apptoken.outputs.value || secrets.AUTODUCKS_PAT || secrets.GITHUB_TOKEN }}
+        run: |
+          gh issue comment "$ISSUE_NUM" --repo "$REPO" --body \
+            "⚠️ **Agent run failed and its post-execution hook did not report cleanly.** \
+          This is a last-resort watchdog notice — the run's own failure reporting was \
+          skipped or errored (possible corrupted \`post.sh\`). \
+          [View the run logs](https://github.com/$REPO/actions/runs/$RUN_ID). \
+          **Next:** re-run with a larger turn budget, or inspect the hook." || true

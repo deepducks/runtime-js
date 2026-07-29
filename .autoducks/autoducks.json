@@ -1,0 +1,16 @@
+{
+  "command": "",
+  "providers": {
+    "its": "github",
+    "git": "github",
+    "llm": "claude"
+  },
+  "defaults": {
+    "model": "claude-sonnet-5",
+    "effort": "high",
+    "base_branch": "main"
+  },
+  "product": {
+    "enabled": false
+  }
+}
