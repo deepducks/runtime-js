@@ -1,8 +1,6 @@
 name: 'Autoducks: Product Agent'
 
 on:
-  schedule:
-    - cron: '0 9 * * *'
   workflow_dispatch:
     inputs:
       issue_number:
