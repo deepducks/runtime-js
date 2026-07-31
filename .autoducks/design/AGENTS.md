@@ -150,6 +150,10 @@ Utility agents handle recovery, cleanup, and lifecycle operations. They are not 
 
 **Verb:** `close` — tears a finished pipeline down: closes child tasks and PRs, deletes task and pipeline branches (both prefixes), strips labels, closes the issue with a cleanup summary. Security default: `OWNER`, `MEMBER`.
 
+### Update Agent
+
+**Verb:** `update` — keeps the installed machinery current. Checks `update.source_repo` (default `deepducks/autoducks`) for a newer version on the configured `channel` (`stable`/`edge`), runs every migration under [`migrations/<version>/migrate.sh`](../migrations/README.md) for versions in `(installed, target]`, and delivers the result per `update.mode`: a pull request (`pr`, the default), a direct commit (`commit`), or no-op (`off`). Fires on `update.schedule` (baked into the workflow, like `product.schedule`), plus `workflow_dispatch` and `/update` unconditionally. Detects **drift** — local edits to vendored machinery outside the consumer-owned set ([`core/config/consumer-owned.sh`](../core/config/consumer-owned.sh)) — and either warns and proceeds or aborts, per `update.on_drift`. PR-only by default (`mode: pr`); like Revert/Close, it is not part of the planning-to-execution pipeline and carries no stage labels. Security default: `OWNER`, `MEMBER`.
+
 ---
 
 ## Reviewer Agent
@@ -239,7 +243,7 @@ Enabling metarepo mode **forces `orchestrator.mode = sequential`** (load-config)
 
 **Auth — per-owner resolution.** A fine-grained PAT is single-owner, so every cross-repo git/gh op goes through the `git::resolve_token(repo)` seam: `single_pat` (default) uses `AUTODUCKS_PAT`; `per_owner_pat` maps owner → `AUTODUCKS_PAT_<OWNER>`; `github_app` (rides on #1106's broker) mints an installation token per owner. An **access pre-flight gate** (`metarepo-access-gate.sh`) probes write access with the credential that will push — at installer-doctor time and at run start (developer/fix `pre.sh`) — and stops **before any branch is cut**, escalating to the user with the owner-specific fix.
 
-**Protected-child merge settings.** Protected delivery always merges via a merge commit (see above), so every **protected** child repo must have `allow_merge_commit=true` and `allow_auto_merge=true` — the access pre-flight gate reads both off the same `gh api repos/<slug>` probe and fails **before any branch is cut** if either is off on a protected child. Fix: `gh api -X PATCH repos/<owner>/<repo> -F allow_merge_commit=true -F allow_auto_merge=true`.
+**Protected-child merge settings.** Protected delivery always merges via a merge commit (see above), so every **protected** child repo must have `allow_merge_commit=true` and `allow_auto_merge=true`. The cloud wizard now asserts both at install time, via the Worker's admin-scoped installation token (`setup.repo_settings` in `autoducks.json`). The access pre-flight gate remains the **runtime backstop**: it reads both off the same `gh api repos/<slug>` probe and fails **before any branch is cut** if either is off on a protected child, which is what still catches repos that were set up before this assertion shipped, or whose settings changed since. An absent `setup` block means every `repo_settings` default is on, so the gate's behaviour for pre-existing installs is unchanged. Fix: `gh api -X PATCH repos/<owner>/<repo> -F allow_merge_commit=true -F allow_auto_merge=true`.
 
 ---
 
@@ -270,6 +274,8 @@ Retired (cleaned up on sight by revert/close/engineer): `Spec:draft`, `Spec:plan
 .autoducks/
   autoducks.json          # Project configuration: command prefix, providers,
                           # defaults (model/effort/branches/merge), triggers, security
+  VERSION                 # Installed machinery version (semver, e.g. 0.1.0)
+  CHANGELOG.md            # Keep-a-Changelog history; `### Breaking` marks a non-additive release
   assets/                 # Static assets (status-comment loading.gif)
   design/
     AGENTS.md             # This document — canonical agent architecture reference
@@ -281,6 +287,9 @@ Retired (cleaned up on sight by revert/close/engineer): `Spec:draft`, `Spec:plan
     fix/                  # defaults.json + prompt.md + pre.sh/post.sh
     revert/               # defaults.json + run.sh (no LLM)
     close/                # defaults.json + run.sh (no LLM)
+    update/               # defaults.json + run.sh (no LLM)
+  migrations/
+    <version>/migrate.sh  # Consumer-owned config migrations, run in ascending semver order
   core/
     config/               # load-config, load-agent-defaults, parse-directive,
                           # generate-trigger-conditions

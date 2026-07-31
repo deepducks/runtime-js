@@ -49,7 +49,21 @@ status_comment::start "$ISSUE_NUM"
 # yet, hand off to the Maestro on the parent — it owns branch + PR creation
 # (D7) and will dispatch this task back in wave order.
 if [[ -z "$FEATURE_NUM" ]]; then
-  PARENT_NUM=$(gh api "repos/$REPO/issues/$ISSUE_NUM" --jq '.parent.number // empty' 2>/dev/null || true)
+  # its::get_parent separates "no parent" (exit 0, empty) from "could not ask"
+  # (exit 1). Collapsing the two is what made every comment-triggered task run
+  # refuse: the old inline `gh api … --jq '.parent.number'` read a field the REST
+  # issue payload does not have, so it was unconditionally empty and every task
+  # looked like an orphan.
+  PARENT_LOOKUP_OK=true
+  PARENT_NUM="$(its::get_parent "$ISSUE_NUM")" || PARENT_LOOKUP_OK=false
+
+  if [[ "$PARENT_LOOKUP_OK" != true ]]; then
+    status_comment::delegate "$ISSUE_NUM" "Could not determine whether this issue has a parent feature/bug — the issue-tracker query failed, so the run stopped rather than guess. This is **not** a statement about the issue: retry, or dispatch the Developer directly with an explicit \`base_branch\` if you know the parent branch."
+    touch "$AUTODUCKS_DOR_DELEGATED_MARKER"
+    [[ -n "${GITHUB_OUTPUT:-}" ]] && echo "dor_skip=true" >> "$GITHUB_OUTPUT"
+    exit 0
+  fi
+
   if [[ -n "$PARENT_NUM" ]]; then
     PARENT_TITLE=$(its::get_issue "$PARENT_NUM" | jq -r '.title')
     PARENT_PREFIX=$(branch_prefix_for_issue "$PARENT_NUM")
@@ -59,6 +73,25 @@ if [[ -z "$FEATURE_NUM" ]]; then
       PR_BASE_BRANCH="$PARENT_BRANCH"
       FEATURE_NUM="$PARENT_NUM"
       TASK_PREFIX="$PARENT_PREFIX"
+
+      # Hand the resolution to post.sh. `export` cannot do this — pre and post
+      # are separate GHA steps, hence post.sh's own "reconstruct state from git"
+      # block. But that block rebuilds PR_BASE_BRANCH from $BASE_BRANCH, which
+      # the workflow injects per-step from steps.ctx.outputs.base_branch: on the
+      # comment path that is the default branch, so the task PR was opened
+      # against the default branch instead of the feature branch.
+      #
+      # Writing BASE_BRANCH itself to $GITHUB_ENV would not help — a step-level
+      # `env:` entry outranks the job environment, so the workflow's value would
+      # win again. Hence a distinct name that no step declares, which post.sh
+      # prefers when present.
+      if [[ -n "${GITHUB_ENV:-}" ]]; then
+        {
+          echo "AUTODUCKS_RESOLVED_BASE_BRANCH=$BASE_BRANCH"
+          echo "AUTODUCKS_RESOLVED_PR_BASE_BRANCH=$PR_BASE_BRANCH"
+          echo "AUTODUCKS_RESOLVED_FEATURE_NUM=$FEATURE_NUM"
+        } >> "$GITHUB_ENV"
+      fi
     else
       git::dispatch_workflow "autoducks-maestro.yml" \
         -f "feature_issue=$PARENT_NUM" \
@@ -159,10 +192,45 @@ if metarepo::enabled; then
     [[ -n "$_m" && -d "$_m" ]] || continue
     git::submodule_remote "$_m"
     git -C "$_m" fetch origin "$CHILD_BRANCH" 2>/dev/null || true
-    # Branch off the current pinned SHA (== child feature head in sequential mode).
-    git -C "$_m" checkout -B "$CHILD_BRANCH" 2>/dev/null \
-      || git -C "$_m" checkout -B "$CHILD_BRANCH" HEAD
+
+    # The recorded gitlink is *provisional*: submodule_deliver writes the child
+    # feature-branch tip because an async auto-merge cannot report the SHA it
+    # will produce, and reconcile_gitlinks only promotes it to the child's
+    # default-branch tip later. Branching a new task off that pin is therefore
+    # only correct while the pin is still the child's head.
+    #
+    # Once the child has been delivered and its feature branch deleted, the
+    # fetch above finds nothing and `checkout -B` lands on the pin — a commit
+    # that predates the delivery merge. New work is then built on a base
+    # missing everything that merged with it, and the suite goes red on code
+    # that is already correct upstream. Observed on the update-agent task: the
+    # branch was recreated at the pre-delivery tip and arrived without two
+    # already-merged fixes.
+    #
+    # So when the pinned SHA is already contained in the child's default branch,
+    # start from that branch's tip instead. That is strictly forward — the pin
+    # is an ancestor — and it is a no-op mid-feature, when the pin is the head
+    # of a live child branch and therefore not yet merged anywhere.
+    _base_ref=""
+    if ! git -C "$_m" rev-parse --verify -q "origin/$CHILD_BRANCH" >/dev/null 2>&1; then
+      _child_default="$(git -C "$_m" symbolic-ref -q --short refs/remotes/origin/HEAD 2>/dev/null || true)"
+      _child_default="${_child_default:-origin/main}"
+      git -C "$_m" fetch -q origin "${_child_default#origin/}" 2>/dev/null || true
+      _pinned="$(git -C "$_m" rev-parse HEAD 2>/dev/null || true)"
+      if [[ -n "$_pinned" ]] && git -C "$_m" merge-base --is-ancestor "$_pinned" "$_child_default" 2>/dev/null; then
+        _base_ref="$_child_default"
+        echo "::notice::metarepo: '$_m' pin $(git -C "$_m" rev-parse --short HEAD) is already delivered — branching $CHILD_BRANCH from $_child_default instead of the stale pin." >&2
+      fi
+    fi
+
+    if [[ -n "$_base_ref" ]]; then
+      git -C "$_m" checkout -B "$CHILD_BRANCH" "$_base_ref"
+    else
+      git -C "$_m" checkout -B "$CHILD_BRANCH" 2>/dev/null \
+        || git -C "$_m" checkout -B "$CHILD_BRANCH" HEAD
+    fi
   done
+  unset _base_ref _child_default _pinned
 fi
 
 # Prepare task spec for the LLM. resolve_context reads .context.developer.parts

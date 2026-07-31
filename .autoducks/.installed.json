@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 1,
+  "source_repo": "deepducks/autoducks",
+  "channel": "stable",
+  "ref": "3746c6b5f5e70ca1fa3526978784420e7e6a7081",
+  "sha": "3746c6b5f5e70ca1fa3526978784420e7e6a7081",
+  "version": "0.1.0",
+  "installed_at": "2026-07-31T14:56:14Z",
+  "installed_by": "manual",
+  "previous": null
+}
