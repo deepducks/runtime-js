@@ -92,15 +92,28 @@ REVIEWS_JSON=$(git::list_pr_reviews "$PR_NUM")
 PR_COMMENTS_JSON=$(its::list_comments "$PR_NUM")
 FEATURE_COMMENTS_JSON=$(its::list_comments "$FEATURE_NUM")
 
+# Through files, never argv. Linux caps a single argument at 128 KiB
+# (MAX_ARG_STRLEN), and review bodies are the one input here with no ceiling:
+# PR #143 accumulated eight rounds averaging ~20 KiB, ~160 KiB in one argument.
+# execve refuses that with `Argument list too long` before jq sees it — and the
+# more review rounds a PR needs, the more certain the rework agent is to die on
+# it, which is exactly backwards. Same defect as #175 in product/pre.sh.
+REVIEWS_FILE="$(mktemp)"; printf '%s' "$REVIEWS_JSON" > "$REVIEWS_FILE"
+PR_COMMENTS_FILE="$(mktemp)"; printf '%s' "$PR_COMMENTS_JSON" > "$PR_COMMENTS_FILE"
+FEATURE_COMMENTS_FILE="$(mktemp)"; printf '%s' "$FEATURE_COMMENTS_JSON" > "$FEATURE_COMMENTS_FILE"
+
 {
   echo "# Rework context — PR #$PR_NUM / Feature #$FEATURE_NUM"
   echo ""
   jq -n -r \
-    --argjson reviews "$REVIEWS_JSON" \
-    --argjson prc "$PR_COMMENTS_JSON" \
-    --argjson fc "$FEATURE_COMMENTS_JSON" \
+    --slurpfile reviews_w "$REVIEWS_FILE" \
+    --slurpfile prc_w "$PR_COMMENTS_FILE" \
+    --slurpfile fc_w "$FEATURE_COMMENTS_FILE" \
     '
-    ( [ $reviews[] | {
+    ($reviews_w[0]) as $reviews
+    | ($prc_w[0]) as $prc
+    | ($fc_w[0]) as $fc
+    | ( [ $reviews[] | {
           author, body,
           when: (.submittedAt // .createdAt // ""),
           kind: (if (.state // "") != "" then "PR review" else "PR inline comment" end),
@@ -118,6 +131,16 @@ FEATURE_COMMENTS_JSON=$(its::list_comments "$FEATURE_NUM")
       + .body + "\n\n---\n"
     '
 } > /tmp/rework-context.md
+
+# Metarepo runtime signal. Without it the agent has no way to know it must
+# declare the task's `**Modules:**`, and in a metarepo every real code change
+# lives in a child — so an untagged rework task is guaranteed to trip the
+# developer's drift guard on its first commit (#181). Removed first so a stale
+# file from an earlier run on a reused workspace can't fake metarepo mode.
+rm -f /tmp/metarepo-context.md
+if metarepo::enabled; then
+  metarepo::agent_context_block > /tmp/metarepo-context.md
+fi
 
 # Decode the steering prompt (free-text prose from the triggering comment,
 # base64-encoded by parse-directive.sh) to a stable file. Advisory only —

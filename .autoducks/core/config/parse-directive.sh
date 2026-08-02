@@ -6,7 +6,10 @@ set -euo pipefail
 #
 # Input:  COMMENT_BODY env var (or stdin)
 # Output: key=value lines to stdout
-#   command          — canonical verb: architect, engineer, execute, fix, revert, close, review, rework, defer, resolve
+#   command          — canonical verb: any name in agent-roster.sh's
+#                       AUTODUCKS_AGENTS (architect, engineer, execute, fix,
+#                       revert, close, review, rework, defer, resolve, triage,
+#                       merge, update)
 #   original_command — the raw verb the user typed, before alias normalization
 #   model            — claude-opus-5, claude-sonnet-5, claude-haiku-4-5, or empty
 #   effort           — off, low, medium, high, max, or empty
@@ -21,6 +24,14 @@ set -euo pipefail
 #                       token (colon form only); friendly synonyms fan-out/
 #                       fanout→waves and seq→sequential are also accepted.
 #                       Invalid values are ignored, not fatal.
+#   agent_name       — for `command=agent` only: the token immediately after
+#                       the verb, unconditionally (never parsed as a model/
+#                       effort alias), matching ^[a-z0-9][a-z0-9-]{0,63}$.
+#                       Empty when no token follows (catalog mode) or when
+#                       the token fails validation (see agent_name_error).
+#   agent_name_error — `invalid-name` when a token followed `/agent` but
+#                       didn't match the charset above (so agent_name is
+#                       emitted empty instead); empty otherwise.
 #   auto_chain       — `+`-separated canonical verbs to run after this agent
 #                       finishes, from a `#auto:<verb>[+<verb>...]` token.
 #                       Verbs are alias-normalized, deduplicated, capped at 5.
@@ -46,6 +57,12 @@ set -euo pipefail
 BODY="${COMMENT_BODY:-$(cat)}"
 
 _CONFIG_FILE="${AUTODUCKS_CONFIG:-.autoducks/autoducks.json}"
+
+# AUTODUCKS_AGENTS / AUTODUCKS_VERB_SYNONYMS — see agent-roster.sh. The
+# roster lives in one file so normalize_verb() and the install-time guard
+# generator cannot disagree about which agents exist.
+_PD_SH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$_PD_SH_DIR/agent-roster.sh"
 
 # Command namespace (validated; falls back to empty — bare short forms — on
 # garbage). NAMESPACE = command with a single optional leading '/' stripped.
@@ -75,6 +92,8 @@ EFFORT=""
 MAX_TURNS=""
 MAX_ITERATIONS=""
 MODE=""
+AGENT_NAME=""
+AGENT_NAME_ERROR=""
 AUTO_CHAIN=""
 STEERING_LEFTOVER=()
 TRAILING_BODY=""
@@ -83,15 +102,13 @@ TRAILING_BODY=""
 # Built-in synonyms → canonical verb. Custom aliases (config `triggers.<agent>[]`)
 # resolve through the same map keyed by config key.
 normalize_verb() {
-  local v="$1"
-  case "$v" in
-    design)   v="architect" ;;
-    tactics)  v="engineer"  ;;
-    run|work) v="execute"   ;;
-  esac
+  local v="$1" _syn
+  for _syn in "${AUTODUCKS_VERB_SYNONYMS[@]}"; do
+    if [[ "$v" == "${_syn%%:*}" ]]; then v="${_syn#*:}"; break; fi
+  done
   if [[ -f "$_CONFIG_FILE" ]] && command -v jq &>/dev/null; then
     local _agent _alias
-    for _agent in architect engineer execute fix revert close review rework defer resolve; do
+    for _agent in "${AUTODUCKS_AGENTS[@]}"; do
       while IFS= read -r _alias; do
         if [[ -n "$_alias" && "$v" == "$_alias" ]]; then
           v="$_agent"
@@ -105,10 +122,11 @@ normalize_verb() {
 }
 
 is_canonical_verb() {
-  case "$1" in
-    architect|engineer|execute|fix|revert|close|review|rework|defer|resolve) return 0 ;;
-    *) return 1 ;;
-  esac
+  local _agent
+  for _agent in "${AUTODUCKS_AGENTS[@]}"; do
+    if [[ "$1" == "$_agent" ]]; then return 0; fi
+  done
+  return 1
 }
 
 # Verbs that can appear in a #auto: chain: they MUST have a workflow_dispatch
@@ -158,6 +176,21 @@ if [[ -n "$DIRECTIVE" ]]; then
   COMMAND=$(echo "$COMMAND" | tr '[:upper:]' '[:lower:]' | tr -d ',.!?:;')
   ORIGINAL_COMMAND="$COMMAND"
   COMMAND=$(normalize_verb "$COMMAND")
+
+  # ── /agent positional agent-name capture ─────────────────────────────
+  # Unconditional: the token right after `agent` is always the agent name,
+  # never parsed as a model/effort alias. Consumed here (ARG_START bumped)
+  # so neither the directive-token loop nor the steering-prompt loop below
+  # ever sees it.
+  if [[ "$COMMAND" == "agent" && -n "${TOKENS[$ARG_START]:-}" ]]; then
+    _agent_name_tok="${TOKENS[$ARG_START]}"
+    if [[ "$_agent_name_tok" =~ ^[a-z0-9][a-z0-9-]{0,63}$ ]]; then
+      AGENT_NAME="$_agent_name_tok"
+    else
+      AGENT_NAME_ERROR="invalid-name"
+    fi
+    ARG_START=$((ARG_START + 1))
+  fi
 
   for tok in "${TOKENS[@]:$ARG_START}"; do
     # Lowercase without stripping ':' or '#' first, so the colon syntaxes
@@ -297,5 +330,7 @@ echo "effort=$EFFORT"
 echo "max_turns=$MAX_TURNS"
 echo "max_iterations=$MAX_ITERATIONS"
 echo "mode=$MODE"
+echo "agent_name=$AGENT_NAME"
+echo "agent_name_error=$AGENT_NAME_ERROR"
 echo "auto_chain=$AUTO_CHAIN"
 echo "steering_prompt=$STEERING_PROMPT_B64"

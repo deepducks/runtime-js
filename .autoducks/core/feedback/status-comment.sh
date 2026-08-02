@@ -60,6 +60,12 @@ status_comment::start() {
   label=$(status_comment::_label)
   link=$(status_comment::_run_link)
   body="<img src=\"${AUTODUCKS_STATUS_GIF}\" height=\"32\" valign=\"middle\" alt=\"Running...\" /> **\`${label}\`**: running on ${link}"
+  # Posts directly rather than through its::comment_issue because it needs the
+  # returned URL to recover the comment id, so it stamps the marker itself
+  # (#183).
+  if declare -F comment_marker::stamp >/dev/null 2>&1; then
+    body="$(comment_marker::stamp "$body")"
+  fi
   out=$(gh issue comment "$issue_id" --repo "$REPO" --body "$body" 2>/dev/null) || return 0
   # gh prints the comment URL: …/issues/N#issuecomment-<id>
   cid=$(echo "$out" | grep -oE 'issuecomment-[0-9]+' | grep -oE '[0-9]+' | head -1 || true)
@@ -139,6 +145,37 @@ status_comment::delegate() {
   label=$(status_comment::_label)
   link=$(status_comment::_run_link)
   status_comment::_edit "$issue_id" "🔁 **\`${label}\`**: not ready — delegated on ${link}" "$details"
+
+  # Terminal reaction here rather than at the call site, breaking this file's
+  # usual separation from reactions on purpose (#180).
+  #
+  # Every delegation path exits immediately afterwards without doing agent work,
+  # so nothing else ever posts one: the trigger comment stays on the 👀 set at
+  # dispatch, and everything honouring the documented 👀 → 👍/😕 contract reads
+  # the run as still going. On autoducks-staging#12 the Engineer delegated,
+  # the Architect ran, the Engineer re-ran and finished — and the watcher was
+  # still waiting eight minutes later, because the reaction never moved.
+  #
+  # There were seven call sites and all seven had forgotten it. Putting it in
+  # the one function they share means the eighth cannot.
+  #
+  # `rocket`, deliberately NOT `+1`.
+  #
+  # The first version of this fix used `+1` on the reasoning that the 🔁 status
+  # comment already says a handoff happened. That was wrong in a way worth
+  # recording: whoever reads the reaction is not reading the comment. `+1` means
+  # "the agent finished its work", and on this path it has not — the Architect is
+  # still running and the Engineer will re-run afterwards. smoke-test-plan.sh
+  # immediately proved it, reporting `Feature body unchanged — engineer-agent did
+  # not write the plan` against an issue still sitting at `Design:draft`.
+  #
+  # That traded a hang for a false green, which is the worse failure: a hang gets
+  # investigated, a green does not. A handoff is genuinely a third terminal state
+  # for this comment — the run is over, the work is not — and it needs its own
+  # symbol rather than borrowing one that already means something else.
+  if declare -F react_to_comment >/dev/null 2>&1; then
+    react_to_comment "${COMMENT_ID:-}" "rocket" 2>/dev/null || true
+  fi
 }
 
 # ── Persistent orchestrator status comment (survives fresh runners) ─

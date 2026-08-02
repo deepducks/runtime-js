@@ -75,7 +75,11 @@ BACKEND=$(its::priority_backend)
 # `//` can't be used here: jq's `//` treats a literal `false` the same as
 # `null` and falls through to the default, which would silently ignore an
 # explicit `"auto_merge_duplicates": false` in config.
-AUTO_MERGE_DUPLICATES=$(jq -r 'if .product.auto_merge_duplicates == null then true else .product.auto_merge_duplicates end' "$AUTODUCKS_ROOT/autoducks.json")
+# `flag_duplicates` is the current name; `auto_merge_duplicates` is the
+# original one and is still honoured, because the switch outlived its name:
+# the sweep no longer merges anything, it flags. An install that set the old
+# key to false meant "stay out of my backlog" and must keep meaning that.
+AUTO_MERGE_DUPLICATES=$(jq -r 'if .product.flag_duplicates != null then .product.flag_duplicates elif .product.auto_merge_duplicates != null then .product.auto_merge_duplicates else true end' "$AUTODUCKS_ROOT/autoducks.json")
 
 # Same explicit-`false`-honoring form as AUTO_MERGE_DUPLICATES above — read
 # again (not shared with post.sh) so each script fails independently if the
@@ -105,6 +109,22 @@ if [[ "$SCOPE" == "single" ]]; then
 else
   RAW_ISSUES=$(its::list_issues open "$MAX_ISSUES")
 
+  # Pipeline-created tasks are not backlog. The Engineer files them with the
+  # `Task` label and native type, and nothing in the triage predicates below
+  # recognised that: `already_classified` only accepts feature/bug, so every
+  # task looked untriaged and the sweep classified it. Observed on a staging
+  # run — a task was filed at 20:28:13 and the sweep added `Priority:Low` and
+  # `Feature` to it 48s later, leaving an issue that is both Task and Feature
+  # (#183 follow-up). On any repo with the schedule enabled that happens to
+  # every task the Engineer creates.
+  #
+  # Sweep scope only. An explicit `/triage` on a task issue is a human asking
+  # for it by number, and that still works.
+  RAW_ISSUES=$(echo "$RAW_ISSUES" | jq -c '[.[] | select(
+    (((.type // "") | ascii_downcase) != "task")
+    and ((.labels // []) | any(ascii_downcase == "task") | not)
+  )]')
+
   # Truncation check: is there more open backlog than we pulled? Cheap
   # over-fetch (bounded, not unbounded) rather than a second full listing.
   TOTAL_OPEN=$(gh issue list --repo "$REPO" --state open --limit "$((MAX_ISSUES + 1))" --json number --jq 'length' 2>/dev/null || echo 0)
@@ -123,7 +143,11 @@ else
   ISSUES_JSON="$RAW_ISSUES"
   if [[ "$DUPLICATES_ENABLED" == "true" ]]; then
     DEDUP_SEARCH_CAP=25
-    INBOX_NUMBERS=$(echo "$RAW_ISSUES" | jq -c '[.[].number]')
+    # Written to a file rather than passed with --argjson: see the note on the
+    # inbox build below. Hoisted out of the loop so the dedup pass does not pay
+    # a subshell per issue.
+    INBOX_NUMBERS_FILE="$(mktemp)"
+    echo "$RAW_ISSUES" | jq -c '[.[].number]' > "$INBOX_NUMBERS_FILE"
     INBOX_COUNT=$(echo "$RAW_ISSUES" | jq 'length')
     if [[ "$INBOX_COUNT" -gt "$DEDUP_SEARCH_CAP" ]]; then
       job_summary "⚠️ Dedup pre-filter is capped at ${DEDUP_SEARCH_CAP} \`its::search_issues\` call(s) to stay under GitHub search's rate limit; $((INBOX_COUNT - DEDUP_SEARCH_CAP)) of ${INBOX_COUNT} issue(s) in scope got no dedup search hint this run (the LLM still reviews their full title/body)."
@@ -146,8 +170,8 @@ else
           | paste -sd' ' -)
         if [[ -n "$query" ]]; then
           candidates=$(its::search_issues "$query" 2>/dev/null \
-            | jq -c --argjson self "$num" --argjson inbox "$INBOX_NUMBERS" \
-              '[.[].number] | map(select(. != $self and (. as $c | $inbox | index($c) != null)))' \
+            | jq -c --argjson self "$num" --slurpfile inbox "$INBOX_NUMBERS_FILE" \
+              '[.[].number] | map(select(. != $self and (. as $c | $inbox[0] | index($c) != null)))' \
             2>/dev/null || echo "[]")
           SEARCH_CALLS=$((SEARCH_CALLS + 1))
         fi
@@ -182,6 +206,18 @@ ISSUES_JSON=$(echo "$ISSUES_JSON" | jq -c '[.[] | . + {
 DUPLICATES_ENABLED_JSON="false"
 [[ "$DUPLICATES_ENABLED" == "true" ]] && DUPLICATES_ENABLED_JSON="true"
 
+# The whole backlog goes to jq through a file, never through argv.
+#
+# `--argjson issues "$ISSUES_JSON"` made the serialized backlog a single argv
+# entry, and Linux caps one argument at 128 KiB (MAX_ARG_STRLEN) regardless of
+# how much total ARG_MAX allows. Past that, execve refuses the call and the
+# shell reports `jq: Argument list too long` with exit 126 — before jq parses
+# anything. Triage died there on every run, the LLM step was skipped, and the
+# failure was size-dependent, so it started one day and never recovered: the
+# backlog only grows.
+ISSUES_FILE="$(mktemp)"
+printf '%s' "$ISSUES_JSON" > "$ISSUES_FILE"
+
 jq -n \
   --arg scope "$SCOPE" \
   --argjson issue_scope "${ISSUE_NUM:-null}" \
@@ -189,11 +225,11 @@ jq -n \
   --argjson duplicates_enabled "$DUPLICATES_ENABLED_JSON" \
   --arg confidence_threshold "$CONFIDENCE_THRESHOLD" \
   --argjson provisional_classification "$PROVISIONAL_CLASSIFICATION" \
-  --argjson issues "$ISSUES_JSON" \
+  --slurpfile issues "$ISSUES_FILE" \
   '{scope: $scope, issue_scope: $issue_scope, priority_backend: $backend,
     duplicates_enabled: $duplicates_enabled, confidence_threshold: $confidence_threshold,
     provisional_classification: $provisional_classification,
-    classification_enabled: $provisional_classification, issues: $issues}' \
+    classification_enabled: $provisional_classification, issues: $issues[0]}' \
   > /tmp/triage-inbox.json
 
 # ── Human-readable rendering for the LLM ────────────────────────────────

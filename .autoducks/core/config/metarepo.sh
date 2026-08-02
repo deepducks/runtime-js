@@ -147,7 +147,7 @@ metarepo::delivered_children_marker() {
 # after posting a clear issue comment.
 metarepo::commit_task() {
   local issue_num="$1" child_branch="$2" msg="$3"
-  local declared changed c d ok body
+  local declared changed c d ok body diagnosis remedy
   body="$(its::get_issue "$issue_num" | jq -r '.body' 2>/dev/null || true)"
   declared="$(metarepo::modules_from_body "$body" | tr '\n' ' ')"
   changed="$(git::submodule_list_changed | tr '\n' ' ')"
@@ -156,9 +156,28 @@ metarepo::commit_task() {
     for d in $declared; do [[ "$c" == "$d" ]] && { ok=true; break; }; done
     if [[ "$ok" != true ]]; then
       export AUTODUCKS_FAIL_CATEGORY="module_drift" AUTODUCKS_FAIL_PHASE="post"
-      its::comment_issue "$issue_num" "🚧 **Drift guard:** this task changed submodule \`$c\`, which is **not** in its declared \`**Modules:**\` (\`${declared:-none}\`). Metarepo tasks may only touch declared modules so cross-module dependency ordering stays correct.
 
-**Fix:** re-run \`$(autoducks_command_for engineer)\` to add \`$c\` to this task's modules, or restrict the change to the declared module(s)." 2>/dev/null || true
+      # The remedy depends on *why* the declaration is wrong, and naming a
+      # re-plan unconditionally has been actively harmful: on a rework task it
+      # would re-plan (and re-reconcile) the whole parent feature, tasks
+      # already executed and delivered included. The task's own
+      # `**Modules:**` field is the correct target in every case (#181).
+      if [[ -z "$declared" ]]; then
+        diagnosis="this task changed submodule \`$c\`, but it declares **no** \`**Modules:**\` at all. In a metarepo every code change lives in a child, so an empty declaration means no change can ever be legal."
+      else
+        diagnosis="this task changed submodule \`$c\`, which is **not** in its declared \`**Modules:**\` (\`$declared\`). Metarepo tasks may only touch declared modules so cross-module dependency ordering stays correct."
+      fi
+
+      remedy="add \`$c\` to this task's \`## Modules\` section (and its \`<!-- autoducks:modules: ... -->\` marker), or restrict the change to the declared module(s)"
+      if ! grep -qF '<!-- autoducks:rework:' <<< "$body"; then
+        # A plan-derived task: re-planning the parent feature is a legitimate
+        # second option, because the plan is where its modules were decided.
+        remedy+=". If the *plan* is what's wrong, re-run \`$(autoducks_command_for engineer)\` on the parent feature to re-declare it"
+      fi
+
+      its::comment_issue "$issue_num" "🚧 **Drift guard:** $diagnosis
+
+**Fix:** $remedy." 2>/dev/null || true
       echo "::error::metarepo drift guard: task #$issue_num changed undeclared module '$c' (declared: ${declared:-none})" >&2
       return 1
     fi
@@ -192,19 +211,38 @@ metarepo::repin_gitlinks() {
 
   git commit -q -m "chore(metarepo): re-pin submodule gitlinks to delivered SHAs" 2>/dev/null || return 0
   if git push -q origin "HEAD:refs/heads/${feature_branch}" 2>/dev/null; then
-    echo "::notice::repin: re-pinned submodule gitlink(s) on $feature_branch" >&2
-    # The pre-merge SHAs are now unreferenced — delete the retained child branches.
-    for pair in "$@"; do
-      path="${pair%%=*}"
-      local slug ctok; slug="$(metarepo::slug_for_path "$path" 2>/dev/null || true)"
-      [[ -n "$slug" ]] || continue
-      ctok="$(git::resolve_token "$slug")"
-      GH_TOKEN="$ctok" gh api "repos/$slug/git/refs/heads/${feature_branch}" -X DELETE --silent 2>/dev/null || true
-    done
+    # The pre-merge SHAs are now unreferenced, so the child branches *could* be
+    # deleted here — and they used to be. They are not, because a successful
+    # re-pin says nothing about whether the parent is done: its PR is still open
+    # and its review loop can still dispatch rework rounds that need a child
+    # branch to commit onto. Deletion belongs to the parent's PR close, which is
+    # the moment the pipeline that created these branches actually ends (#182).
+    echo "::notice::repin: re-pinned submodule gitlink(s) on $feature_branch — child branches retained until the parent PR closes" >&2
   else
     echo "::warning::repin: failed to push re-pinned gitlinks to $feature_branch — child feature branches kept (pre-merge SHA still reachable)." >&2
     return 1
   fi
+}
+
+# metarepo::child_default_branch(path) → the child's default branch name.
+#
+# The host is authoritative (a child's default is not recorded anywhere in the
+# parent), but a runner that already has the submodule checked out can answer
+# offline, and that fallback is what keeps the push guard working when the API
+# is unreachable. Never returns empty: an empty answer would make the guard
+# compare against "" and wave everything through.
+metarepo::child_default_branch() {
+  local path="$1" slug token out=""
+  slug="$(metarepo::slug_for_path "$path" 2>/dev/null || true)"
+  if [[ -n "$slug" ]]; then
+    token="$(git::resolve_token "$slug" 2>/dev/null || true)"
+    out="$(GH_TOKEN="$token" gh api "repos/$slug" --jq '.default_branch' 2>/dev/null || true)"
+  fi
+  if [[ -z "$out" && -d "$path" ]]; then
+    out="$(git -C "$path" symbolic-ref -q --short refs/remotes/origin/HEAD 2>/dev/null || true)"
+    out="${out#origin/}"
+  fi
+  printf '%s\n' "${out:-main}"
 }
 
 # metarepo::pin_relation(slug, pinned_sha, tip_sha) → one of
@@ -228,6 +266,61 @@ metarepo::pin_relation() {
     identical|behind|ahead|diverged) echo "$status" ;;
     *) echo unknown ;;
   esac
+}
+
+# metarepo::pin_reachable(slug, sha) → 0 when some remote ref on the child
+# reaches SHA, 1 when nothing does, 2 when the answer could not be determined
+# (offline, no token, unknown slug) — an undetermined answer is never a failure.
+#
+# pin_relation answers "where is the pin relative to the default branch", which
+# is a different question from "can anyone clone this". A child PR can be
+# merged, closed or open while the SHA the parent pins is reachable by nothing:
+# the branch was deleted, history was rewritten, or the merge produced a
+# different commit than the one pinned. That is the state that breaks a fresh
+# clone — `git submodule update` has no ref to fetch — and the delivery check
+# reported SUCCESS right through it on meta#165 (#176, #178).
+#
+# Three steps, cheapest first, and it stops at the first that answers:
+#   1. contained in the default branch — the overwhelmingly common case, one
+#      compare call, and the same one pin_relation already makes.
+#   2. equal to some ref tip, including refs/pull/*/head — one `ls-remote`, no
+#      API quota. Covers a pin ahead of the default branch that is still the tip
+#      of its delivery branch or PR head.
+#   3. contained in some open PR head — only reached when a pin is ahead of the
+#      default branch AND is an interior commit of an open PR, which is rare
+#      enough to be worth the extra calls and wrong enough to be worth catching.
+metarepo::pin_reachable() {
+  local slug="$1" sha="$2"
+  [[ -n "$slug" && -n "$sha" ]] || return 2
+
+  local token default_branch
+  token="$(git::resolve_token "$slug")"
+  default_branch="$(GH_TOKEN="$token" gh api "repos/$slug" --jq '.default_branch' 2>/dev/null || true)"
+  [[ -n "$default_branch" ]] || return 2
+
+  case "$(metarepo::pin_relation "$slug" "$sha" \
+            "$(GH_TOKEN="$token" gh api "repos/$slug/commits/$default_branch" --jq '.sha' 2>/dev/null || echo '')")" in
+    identical|behind) return 0 ;;
+  esac
+
+  # `--refs` drops the peeled `^{}` lines; refs/pull/*/head is not in the
+  # default refspec, so it is asked for explicitly.
+  local url="https://x-access-token:${token}@github.com/${slug}.git"
+  if git ls-remote "$url" 'refs/heads/*' 'refs/tags/*' 'refs/pull/*/head' 2>/dev/null \
+       | awk '{print $1}' | grep -qxF "$sha"; then
+    return 0
+  fi
+
+  local head_sha
+  while read -r head_sha; do
+    [[ -n "$head_sha" ]] || continue
+    case "$(metarepo::pin_relation "$slug" "$sha" "$head_sha")" in
+      identical|behind) return 0 ;;
+    esac
+  done < <(GH_TOKEN="$token" gh api "repos/$slug/pulls?state=open&per_page=100" \
+             --jq '.[].head.sha' 2>/dev/null || true)
+
+  return 1
 }
 
 # metarepo::reconcile_gitlinks(head_branch, path ...) — bring a parent PR's
@@ -328,7 +421,7 @@ metarepo::agent_context_block() {
   echo "- All work for a child happens **inside its submodule directory** (e.g. \`autoducks/.autoducks/...\`), **never** the metarepo's own root \`.autoducks/\` or \`.github/\`."
   echo "- The metarepo's OWN \`.autoducks/\`, \`.github/\`, and root files are the metarepo's machinery — **never edit them for a feature**."
   echo "- A design that references a path like \`.autoducks/runtimes/...\` means that path **inside the target submodule** (\`<module>/.autoducks/runtimes/...\`)."
-  echo "- **Engineer:** tag every task's \`**Modules:**\` with the submodule path(s) it changes (e.g. \`autoducks\`). This is required, not optional."
+  echo "- **Engineer / Rework (any agent that writes a task spec):** tag every task's \`**Modules:**\` with the submodule path(s) it changes (e.g. \`autoducks\`). This is required, not optional — an untagged task is rejected before it is filed."
   echo "- **Developer:** only edit files under the task's declared module directories; if the task needs a file outside them, stop rather than editing the metarepo root."
 }
 
@@ -348,6 +441,72 @@ metarepo::validate_modules() {
   return 0
 }
 
+# metarepo::protected_for_path PATH [CONFIG] → "true"/"false" for whether the
+# child's default branch requires a PR to advance.
+#
+# `metarepo.submodules.<path>.protected` is documented as `bool | null` where
+# null means "detect at runtime" — so a non-null value is an explicit override.
+# It was read by nothing: every caller went straight to
+# git::submodule_protection, which always queries the host. Config that reads
+# like a switch has to be one.
+#
+# An override is worth having in two directions. Setting `true` for a child that
+# is not protected yet makes the parent behave as if it were, so delivery is
+# gated before the protection lands rather than after. Setting `false` skips a
+# per-child API round trip on a repo whose policy you already know.
+metarepo::protected_for_path() {
+  local path="$1"
+  local cfg="${2:-}"
+  [[ -z "$cfg" ]] && cfg="${AUTODUCKS_ROOT:-.autoducks}/autoducks.json"
+
+  # Not `// "null"`: jq's alternative operator treats `false` as empty, so an
+  # explicit `protected: false` would fall through to runtime detection and the
+  # override would work in one direction only.
+  local configured
+  configured="$(jq -r --arg p "$path" \
+    '.metarepo.submodules[$p].protected | if . == null then "null" else tostring end' \
+    "$cfg" 2>/dev/null || echo "null")"
+  case "$configured" in
+    true|false) printf '%s\n' "$configured"; return 0 ;;
+  esac
+
+  # null, absent, or unreadable config — detect at runtime, as documented.
+  local slug
+  slug="$(metarepo::slug_for_path "$path" 2>/dev/null || true)"
+  [[ -n "$slug" ]] || { echo "false"; return 0; }
+  git::submodule_protection "$slug" 2>/dev/null || echo "false"
+}
+
+# metarepo::stale_submodule_keys [CONFIG] → every `metarepo.submodules` key with
+# no matching path in .gitmodules, one per line. Exit 1 when any is found.
+#
+# `metarepo.submodules` is keyed by submodule path, but nothing tied the two
+# together, so a retired child left a key behind that read like live config
+# (`autoducks-cli` outlived its submodule by four months). .gitmodules is the
+# same source of truth validate_modules() uses.
+metarepo::stale_submodule_keys() {
+  local cfg="${1:-}"
+  [[ -z "$cfg" ]] && cfg="${AUTODUCKS_ROOT:-.autoducks}/autoducks.json"
+  local known stale=() k
+  known="$(metarepo::submodule_paths)"
+  while IFS= read -r k; do
+    [[ -z "$k" ]] && continue
+    grep -qxF "$k" <<< "$known" || stale+=("$k")
+  done < <(jq -r '.metarepo.submodules // {} | keys[]' "$cfg" 2>/dev/null)
+  [[ "${#stale[@]}" -eq 0 ]] && return 0
+  printf '%s\n' "${stale[@]}"
+  return 1
+}
+
+# NOTE: there is deliberately no "submodule declared in .gitmodules but absent
+# from metarepo.submodules" check. The set of children is read from .gitmodules
+# by every consumer that needs it (metarepo::submodule_paths — the access gate,
+# sync-child-gitlinks, submodule-list-changed, parse-plan.py). `metarepo.submodules`
+# is an *override map*, not a registry: the only key it carries is `protected`,
+# whose default `null` means "detect at runtime". So `{"child": {"protected": null}}`
+# states nothing that is not already true, and nudging operators to write it would
+# manufacture exactly the kind of inert config #120 was filed about.
+
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
   case "${1:-}" in
     paths)  metarepo::submodule_paths ;;
@@ -355,8 +514,11 @@ if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
     owner)  metarepo::owner_for_path "${2:?path required}" ;;
     modules) metarepo::modules_from_body "${2:-}" ;;
     delivered) metarepo::delivered_children_from_body "${2:-}" ;;
+    stale-keys)   metarepo::stale_submodule_keys "${2:-}" ;;
+    protected)    metarepo::protected_for_path "${2:?path required}" ;;
+    reachable)    metarepo::pin_reachable "${2:?slug required}" "${3:?sha required}" ;;
     --help|*)
-      echo "Usage: metarepo.sh {paths|slug PATH|owner PATH}"
+      echo "Usage: metarepo.sh {paths|slug PATH|owner PATH|protected PATH|stale-keys [CONFIG]}"
       echo "  Config helpers mapping a submodule path -> child repo slug via .gitmodules" ;;
   esac
 fi

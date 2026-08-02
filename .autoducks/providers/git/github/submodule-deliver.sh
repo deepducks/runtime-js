@@ -158,7 +158,7 @@ git::submodule_deliver() {
   local token; token="$(git::resolve_token "$slug")"
   local default_branch
   default_branch="$(GH_TOKEN="$token" gh api "repos/$slug" --jq '.default_branch' 2>/dev/null || echo "main")"
-  local protected; protected="$(git::submodule_protection "$slug")"
+  local protected; protected="$(metarepo::protected_for_path "$path")"
   local method; method="$(git::_child_delivery_method "$slug" "$token")"
 
   local feat_sha
@@ -230,11 +230,34 @@ git::submodule_deliver() {
     local mergeable_state mergeable merge_state_status
     mergeable_state="$(git::_child_wait_for_mergeable "$slug" "$pr_num" "$token")"
     read -r mergeable merge_state_status <<< "$mergeable_state"
-    if [[ "$mergeable" == "CONFLICTING" || ( "$mergeable" == "UNKNOWN" && "$merge_state_status" == "BEHIND" ) ]]; then
-      echo "::warning::submodule_deliver: protected child PR #$pr_num on $slug is $mergeable/$merge_state_status — leaving it open for conflict resolution." >&2
+    # Arm auto-merge only on a definitive MERGEABLE. The guard used to admit
+    # anything that was not CONFLICTING-or-UNKNOWN/BEHIND, which meant a plain
+    # UNKNOWN/UNKNOWN passed — and that is precisely what a freshly-created PR
+    # reports while GitHub is still computing mergeability. _child_wait_for_mergeable
+    # gives up after its poll budget and returns whatever it last saw, so a
+    # genuinely conflicting PR could be armed during the computation window (#176).
+    #
+    # Undetermined is not safe. Leaving the PR open costs a resolver run; arming
+    # it wrongly cost the branch holding the work.
+    if [[ "$mergeable" != "MERGEABLE" ]]; then
+      echo "::warning::submodule_deliver: protected child PR #$pr_num on $slug is $mergeable/$merge_state_status — not arming auto-merge; leaving it open for conflict resolution." >&2
       echo "$feat_sha 0 1 $pr_num"; return 0
     fi
-    if GH_TOKEN="$token" gh pr merge "$pr_num" --repo "$slug" --merge --auto --delete-branch 2>/dev/null; then
+    # NO --delete-branch here. `--auto` defers the merge until required checks
+    # pass, but gh's --delete-branch does not wait for that — it deletes as soon
+    # as the command returns. GitHub closes a PR whose head branch disappears, so
+    # the pairing armed auto-merge and then immediately closed the PR unmerged,
+    # cancelled the auto-merge, and destroyed the branch holding the work (#176:
+    # PR #1140 went auto_merge_enabled → closed/head_ref_deleted in 3 seconds,
+    # and the resolver dispatched afterwards died at checkout on a branch that no
+    # longer existed).
+    #
+    # The synchronous merges below no longer delete either, for a different
+    # reason: delivery does not own the child branch's lifetime. The parent's
+    # pipeline created it and the parent's PR close deletes it (#182) — deleting
+    # it here retires it while the parent PR is still open and its review loop
+    # can still dispatch rework rounds that need somewhere to commit.
+    if GH_TOKEN="$token" gh pr merge "$pr_num" --repo "$slug" --merge --auto 2>/dev/null; then
       echo "::notice::submodule_deliver: enabled auto-merge (merge commit) on protected child PR #$pr_num on $slug — merges when required checks pass." >&2
       # Auto-merge is only as good as the checks it waits on: verify they exist
       # rather than assuming the PR's creation event produced a run (#119c).
@@ -243,7 +266,7 @@ git::submodule_deliver() {
     fi
     # Repo may disallow auto-merge — try an immediate merge commit (works when no
     # required checks are pending). That merge IS synchronous, so pin its result.
-    if GH_TOKEN="$token" gh pr merge "$pr_num" --repo "$slug" --merge --delete-branch 2>/dev/null; then
+    if GH_TOKEN="$token" gh pr merge "$pr_num" --repo "$slug" --merge 2>/dev/null; then
       read -r pin repin <<< "$(git::_child_pin_after_merge "$slug" "$default_branch" "$token" "$feat_sha")"
       echo "::notice::submodule_deliver: merged protected child PR #$pr_num on $slug via merge commit — pinned $default_branch tip $pin." >&2
       echo "$pin $repin 0 "; return 0
@@ -263,7 +286,7 @@ git::submodule_deliver() {
   case "$method" in
     merge)
       # (Unprotected + merge was already handled by the FF/merges-API path above.)
-      if GH_TOKEN="$token" gh pr merge "$pr_num" --repo "$slug" --merge --delete-branch 2>/dev/null; then
+      if GH_TOKEN="$token" gh pr merge "$pr_num" --repo "$slug" --merge 2>/dev/null; then
         read -r pin repin <<< "$(git::_child_pin_after_merge "$slug" "$default_branch" "$token" "$feat_sha")"
         echo "::notice::submodule_deliver: merged child PR #$pr_num on $slug via merge commit — pinned $default_branch tip $pin." >&2
         echo "$pin $repin 0 "; return 0
