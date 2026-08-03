@@ -28,9 +28,14 @@ status_comment::start "$ISSUE_NUM"
 # via the shared pre-failed marker + skip=true (no LLM call, post.sh no-ops).
 refuse() {
   local message="$1"
-  its::comment_issue "$ISSUE_NUM" "$message" || true
+  # The reason goes in the status comment only. Posting it as a standalone
+  # comment as well put identical text on the issue twice for every refusal:
+  # once from its::comment_issue, once as the status comment's failure body.
   react_to_comment "${COMMENT_ID:-}" "confused"
-  status_comment::fail "$ISSUE_NUM" "$message" 2>/dev/null || true
+  if ! status_comment::fail "$ISSUE_NUM" "$message" 2>/dev/null; then
+    # Nothing to edit — do not let a status-comment failure swallow the reason.
+    its::comment_issue "$ISSUE_NUM" "$message" || true
+  fi
   progress_labels::abort "$ISSUE_NUM" "Agent:running" 2>/dev/null || true
   touch "$AUTODUCKS_PRE_FAILED_MARKER"
   [[ -n "${GITHUB_OUTPUT:-}" ]] && echo "skip=true" >> "$GITHUB_OUTPUT"
@@ -45,10 +50,22 @@ fi
 # ── Refusal #2: custom agents disabled repo-wide (never opens a definition) ─
 AGENT_REPO_ROOT="${GITHUB_WORKSPACE:-$(pwd)}"
 AGENT_LIVE_CONFIG="${AUTODUCKS_CONFIG:-$AGENT_REPO_ROOT/.autoducks/autoducks.json}"
-CUSTOM_AGENTS_ENABLED="true"
-if [[ -f "$AGENT_LIVE_CONFIG" ]]; then
-  CUSTOM_AGENTS_ENABLED="$(jq -r 'if .custom_agents.enabled == false then "false" else "true" end' "$AGENT_LIVE_CONFIG" 2>/dev/null || echo true)"
-fi
+
+# Config, like the definitions themselves, is read from the base branch —
+# never the checked-out tree. `enabled` is the repo owner's kill switch, so a
+# contributor must not be able to flip it back on in the same change that
+# uses the lane. See discover-agents.sh for the full reasoning.
+agent_base_config() {
+  if [[ -n "${AUTODUCKS_BASE_REF:-}" ]]; then
+    git -C "$AGENT_REPO_ROOT" show "$AUTODUCKS_BASE_REF:.autoducks/autoducks.json" 2>/dev/null || echo '{}'
+  elif [[ -f "$AGENT_LIVE_CONFIG" ]]; then
+    cat "$AGENT_LIVE_CONFIG"
+  else
+    echo '{}'
+  fi
+}
+
+CUSTOM_AGENTS_ENABLED="$(agent_base_config | jq -r 'if .custom_agents.enabled == false then "false" else "true" end' 2>/dev/null || echo true)"
 if [[ "$CUSTOM_AGENTS_ENABLED" == "false" ]]; then
   refuse "🚫 Custom agents are disabled for this repository."
 fi
@@ -122,13 +139,20 @@ fi
 # ── Refusal #4: surface mismatch (issue vs pr) ──────────────────────────
 CURRENT_SURFACE="issue"
 [[ "${IS_PR:-false}" == "true" ]] && CURRENT_SURFACE="pr"
-if [[ "$DESC_SURFACE" != "$CURRENT_SURFACE" ]]; then
-  if [[ "$DESC_SURFACE" == "pr" ]]; then
+# `both` means both, so it never mismatches. Comparing for equality alone
+# refused it on every surface, and the message then reported it as
+# `surface: issue` — the else branch only distinguished `pr` — so an agent
+# declared `both`, invoked on an issue, was told it can only run on an issue.
+case "$DESC_SURFACE" in
+  both)               : ;;
+  "$CURRENT_SURFACE") : ;;
+  pr)
     refuse "🚫 \`${AGENT_NAME}\` is declared \`surface: pr\` and can only run from a pull request — re-run \`$(autoducks_command_for agent) ${AGENT_NAME}\` on the pull request instead."
-  else
+    ;;
+  *)
     refuse "🚫 \`${AGENT_NAME}\` is declared \`surface: issue\` and can only run from an issue — re-run \`$(autoducks_command_for agent) ${AGENT_NAME}\` on the issue instead."
-  fi
-fi
+    ;;
+esac
 
 # ── Tool resolution: discover-agents.sh already applied levels 1+2
 # (custom_agents.agents.<name>.tools beats frontmatter tools outright, no
@@ -137,6 +161,29 @@ fi
 # workflow falls through to steps.agent.outputs.tools (load-agent-defaults.sh's
 # union of this lane's defaults.json with the repo-wide .defaults.tools). ──
 TOOLS_CSV="$(jq -r '.tools_effective // [] | join(",")' <<<"$DESCRIPTOR_JSON")"
+
+# Whatever the definition asks for, the lane's own output contract still has
+# to be satisfiable. The wrapper prompt requires the agent to write
+# /tmp/agent-response.md, and a definition that declares `tools` REPLACES the
+# lane default outright — so `tools: [WebSearch]` produced an agent that was
+# ordered to write a file with no tool that can write, burned its whole turn
+# budget on denied calls, and failed as `scope-missing`, blaming the
+# definition for "not stating an output contract".
+#
+# The same applies to Read: the wrapper's `## Input` section lists the
+# materialized context files and tells the agent to read them, so a definition
+# without Read answers blind. That failed quietly rather than loudly — the
+# agent produced a plausible answer and only mentioned in passing that it
+# could not read the request, which it misdiagnosed as sandboxing.
+#
+# So required_tools is unioned in, always. It is deliberately not part of
+# defaults.json's `tools`: that list is a *default* a definition may replace,
+# while this one is the floor the lane needs to function at all.
+REQUIRED_TOOLS_JSON="$(jq -c '.required_tools // []' "$AUTODUCKS_PINNED_ROOT/.autoducks/agents/agent/defaults.json" 2>/dev/null || echo '[]')"
+if [[ -n "$TOOLS_CSV" && "$REQUIRED_TOOLS_JSON" != "[]" ]]; then
+  TOOLS_CSV="$(jq -rn --argjson req "$REQUIRED_TOOLS_JSON" --arg csv "$TOOLS_CSV" \
+    '($csv | split(",")) + $req | unique_by(.) | join(",")')"
+fi
 
 DESC_MODEL="$(jq -r '.model // empty' <<<"$DESCRIPTOR_JSON")"
 DESC_EFFORT="$(jq -r '.effort // empty' <<<"$DESCRIPTOR_JSON")"
@@ -152,10 +199,21 @@ if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
   } >> "$GITHUB_OUTPUT"
 fi
 
-# ── Read the inherited definition body (the descriptor carries only
-# body_bytes, not the text — discover-agents.sh scans the live tree, so the
-# body is read from there too, not the pinned snapshot). ────────────────
-DEFINITION_FILE="$AGENT_REPO_ROOT/$DESC_SOURCE"
+# ── Read the inherited definition body ─────────────────────────────────
+# From AUTODUCKS_BASE_REF, the same source discover-agents.sh enumerated it
+# from. This is the load-bearing read of the whole lane: the body below
+# becomes the agent's prompt, so reading it from the checked-out tree would
+# mean executing content from refs/pull/N/head — exactly what discovering
+# from the base ref exists to prevent. Discovery and prompt assembly must
+# never disagree about which tree a definition came from.
+DEFINITION_FILE="$(mktemp)"
+if [[ -n "${AUTODUCKS_BASE_REF:-}" ]]; then
+  if ! git -C "$AGENT_REPO_ROOT" show "$AUTODUCKS_BASE_REF:$DESC_SOURCE" > "$DEFINITION_FILE" 2>/dev/null; then
+    refuse "🚫 \`${AGENT_NAME}\` could not be read from the base branch (\`${DESC_SOURCE}\`). Custom agents only run definitions that are merged."
+  fi
+else
+  cat "$AGENT_REPO_ROOT/$DESC_SOURCE" > "$DEFINITION_FILE" 2>/dev/null || true
+fi
 
 # extract_body FILE — strip a leading `---`-delimited frontmatter block if
 # present, same detection discover-agents.sh's own parse_definition uses
