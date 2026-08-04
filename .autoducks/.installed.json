@@ -2,14 +2,14 @@
   "schemaVersion": 1,
   "source_repo": "deepducks/autoducks",
   "channel": "stable",
-  "ref": "4ac745e52ee271fff7ef8b677cfb875c5572ae44",
-  "sha": "4ac745e52ee271fff7ef8b677cfb875c5572ae44",
-  "version": "0.5.8",
-  "installed_at": "2026-08-04T00:06:29Z",
-  "installed_by": "autoducks-update.yml#30864501655",
+  "ref": "0a09e02a45b55e8b0b9ad460a466a123be81fcee",
+  "sha": "0a09e02a45b55e8b0b9ad460a466a123be81fcee",
+  "version": "0.5.9",
+  "installed_at": "2026-08-04T16:12:33Z",
+  "installed_by": "autoducks-update.yml#30927983459",
   "previous": {
-    "ref": "v0.5.2",
-    "sha": "b062c9a0ab871d9ee5dbb0bce1a430b27dbc36ee",
-    "version": "0.5.2"
+    "ref": "4ac745e52ee271fff7ef8b677cfb875c5572ae44",
+    "sha": "4ac745e52ee271fff7ef8b677cfb875c5572ae44",
+    "version": "0.5.8"
   }
 }
